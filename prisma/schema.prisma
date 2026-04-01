@@ -1,0 +1,91 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ========== 用户 ==========
+model User {
+  id         String   @id @default(uuid())
+  supabaseId String   @unique
+  email      String?  @unique
+  nickname   String   @default("创作者")
+  avatarUrl  String?
+  createdAt  DateTime @default(now())
+
+  stories  Story[]
+  sessions PlaySession[]
+}
+
+// ========== 故事 ==========
+model Story {
+  id            String      @id @default(uuid())
+  authorId      String
+  author        User        @relation(fields: [authorId], references: [id])
+
+  title         String
+  description   String      @default("")
+  coverImageUrl String?
+  tags          String[]    @default([])
+  status        StoryStatus @default(DRAFT)
+  publishedAt   DateTime?
+
+  // 完整故事数据 JSON（nodes, edges, settings, style, worldView）
+  data     Json
+  // 主体数据 JSON（characters, scenes, props）
+  entities Json?
+
+  playCount Int @default(0)
+  likeCount Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sessions PlaySession[]
+  branches GeneratedBranch[]
+
+  @@index([status, publishedAt(sort: Desc)])
+  @@index([authorId])
+}
+
+enum StoryStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+// ========== 游玩会话 ==========
+model PlaySession {
+  id            String   @id @default(uuid())
+  storyId       String
+  story         Story    @relation(fields: [storyId], references: [id])
+  playerId      String?
+  player        User?    @relation(fields: [playerId], references: [id])
+
+  currentNodeId String
+  history       Json     // PlayStep[]
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([storyId])
+  @@index([playerId])
+}
+
+// ========== 用户生成分支 ==========
+model GeneratedBranch {
+  id           String @id @default(uuid())
+  storyId      String
+  story        Story  @relation(fields: [storyId], references: [id])
+  parentNodeId String
+  playerInput  String
+
+  generatedNodes Json // StoryNode[]
+  generatedEdges Json // StoryEdge[]
+  usageCount     Int      @default(1)
+  createdAt      DateTime @default(now())
+
+  @@index([storyId, parentNodeId])
+}
