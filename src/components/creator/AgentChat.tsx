@@ -10,7 +10,7 @@ import type { StoryNode, StoryEdge, StoryOutline } from '@/types/story';
 import { matchFastPath, SKILL_PIPELINE } from '@/lib/agent/intents';
 import type { IntentResult } from '@/lib/agent/intents';
 import { v4 as uuid } from 'uuid';
-import { useAgentGraph } from '@/hooks/useAgentGraph';
+import { useReactLoop } from '@/hooks/useReactLoop';
 import { layoutNodes } from '@/lib/layout';
 
 const skillLabels: Record<SkillName, string> = {
@@ -145,7 +145,7 @@ export default function AgentChat() {
   const requestedDepthRef = useRef<number | undefined>(undefined);
 
   // LangGraph agent
-  const reactLoop = useAgentGraph();
+  const reactLoop = useReactLoop();
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -1544,24 +1544,21 @@ export default function AgentChat() {
     // ========== ReAct Mode ==========
     if (agentMode === 'react') {
       addMessage({ role: 'user', content: text });
-
-      // Determine mode: edit only if story creation is fully complete
-      const story = useStoryStore.getState().story;
-      const contentNodes = story ? (story.nodes || []).filter((n: any) => n.type !== 'story_config') : [];
-      const hasNodes = contentNodes.length > 0;
-      const creationComplete = hasNodes && contentNodes.every(
-        (n: any) => (n.data.frames?.length > 0) && (n.data.voiceSegments?.length > 0)
-      );
-      const mode = creationComplete ? 'edit' : 'create';
-
-      const { orchestrator } = useChatStore.getState();
-      if (!orchestrator.storyDescription && !hasNodes) {
-        // First message — start a new story session
-        useChatStore.getState().setStoryDescription(text);
-        reactLoop.startNewStory(text, mode);
+      if (reactLoop.status === 'waiting_user') {
+        reactLoop.resumeLoop(text);
       } else {
-        // Continuing conversation — send message within same session
-        reactLoop.sendMessage(text, mode);
+        // Determine mode: edit only if story creation is fully complete
+        const story = useStoryStore.getState().story;
+        const contentNodes = story ? (story.nodes || []).filter((n: any) => n.type !== 'story_config') : [];
+        const hasNodes = contentNodes.length > 0;
+        const creationComplete = hasNodes && contentNodes.every(
+          (n: any) => (n.data.frames?.length > 0) && (n.data.voiceSegments?.length > 0)
+        );
+        const { orchestrator } = useChatStore.getState();
+        if (!orchestrator.storyDescription && !hasNodes) {
+          useChatStore.getState().setStoryDescription(text);
+        }
+        reactLoop.startLoop(text, creationComplete ? 'edit' : 'create');
       }
       return;
     }
