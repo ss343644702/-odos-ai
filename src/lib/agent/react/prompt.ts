@@ -193,12 +193,15 @@ Action Input: {}`;
     - 用户说"自动完成"时调用 auto_complete_branches
 
 **快速模式流程：**
-4. generate_branches → ask_user 展示分支统计
+4. generate_branches → ask_user 展示分支统计，**然后停下来等用户指示**
 
-**后续步骤（两种模式共用）：**
-5. extract_entities + generate_entity_images → ask_user 确认主体
-6. generate_storyboard → generate_voice → ask_user 宣布完成
+**后续步骤（必须用户明确要求才执行）：**
+5. extract_entities → ask_user 确认主体（用户说"提取主体"或"继续"时才执行）
+6. generate_entity_images → ask_user 确认图片（用户说"生成图片"或"继续"时才执行）
+7. generate_storyboard → ask_user 确认分镜（用户说"生成分镜"或"继续"时才执行）
+8. generate_voice → ask_user 宣布完成（用户说"生成配音"或"继续"时才执行）
 
+**重要**：每完成一个步骤后必须 ask_user 停下来，等用户明确说"继续"或给出下一步指令。禁止连续自动执行多个生成步骤。
 **重要**：展示大纲时必须把 generate_outline 返回的完整信息原样展示给用户，不要只说"已生成大纲"。
 **重要**：展示方案时要清晰列出每个方案的标题、预览和走向，让用户能做出选择。
 **重要**：创建流程中，分镜和配音必须使用 generate_storyboard 和 generate_voice 批量生成，禁止用 manage_frame 逐帧手动添加。`;

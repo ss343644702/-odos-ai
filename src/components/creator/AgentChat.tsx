@@ -141,14 +141,38 @@ export default function AgentChat() {
 
   const [input, setInput] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const chatContainerRef = useRef<HTMLDivElement>(null);
+  const newReplyAnchorRef = useRef<HTMLDivElement>(null);
+  const hasScrolledToReply = useRef(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const requestedDepthRef = useRef<number | undefined>(undefined);
 
   // LangGraph agent
   const reactLoop = useReactLoop();
 
+  // Smart scroll: when user sends a message, scroll to bottom to show it.
+  // When agent starts replying, scroll once to show the reply top, then stop.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (messages.length === 0) return;
+    const lastMsg = messages[messages.length - 1];
+
+    if (lastMsg.role === 'user') {
+      // User just sent — scroll to bottom so they see their own message
+      hasScrolledToReply.current = false;
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    } else if (lastMsg.role === 'assistant' && !hasScrolledToReply.current) {
+      // First assistant message in this round — scroll to its top, once
+      hasScrolledToReply.current = true;
+      // Use rAF to wait for DOM render
+      requestAnimationFrame(() => {
+        if (newReplyAnchorRef.current && chatContainerRef.current) {
+          const container = chatContainerRef.current;
+          const anchor = newReplyAnchorRef.current;
+          const anchorTop = anchor.offsetTop - container.offsetTop;
+          container.scrollTo({ top: anchorTop, behavior: 'smooth' });
+        }
+      });
+    }
   }, [messages]);
 
   // Auto-derive skill progress from actual story data (on mount + data changes)
@@ -1813,52 +1837,54 @@ export default function AgentChat() {
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        {messages.map((msg) => (
-          <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div
-              className="max-w-[90%] rounded-xl px-3 py-2 text-sm whitespace-pre-wrap"
-              style={{
-                background: msg.role === 'user' ? 'var(--accent)' : 'var(--bg-tertiary)',
-                color: msg.role === 'user' ? 'white' : 'var(--text-primary)',
-              }}
-            >
-              {/* ReAct thought (collapsed) */}
-              {msg.reactThought && (
-                <details className="mb-1">
-                  <summary className="text-[10px] cursor-pointer" style={{ color: 'var(--text-muted)' }}>
-                    🧠 思考过程
-                  </summary>
-                  <p className="text-[10px] mt-1 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-                    {msg.reactThought}
-                  </p>
-                </details>
-              )}
-
-              {msg.content}
-
-              {/* Style selection buttons */}
-              {msg.skillName === 'styleConfirm' && msg.confirmRequired && !msg.confirmed && (
-                <div className="flex flex-wrap gap-1.5 mt-3">
-                  {PRESET_STYLES.map((style) => (
-                    <button
-                      key={style.styleId}
-                      onClick={() => handleStyleSelect(style, msg.id)}
-                      className="px-2 py-1 rounded-lg text-xs transition-colors hover:brightness-110"
-                      style={{
-                        background: 'var(--bg-secondary)',
-                        color: 'var(--text-primary)',
-                        border: '1px solid var(--border)',
-                      }}
-                    >
-                      {style.styleName}
-                    </button>
-                  ))}
+      <div ref={chatContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4">
+        {messages.map((msg, idx) => {
+          const isReplyAnchor = msg.role === 'assistant' && (idx === 0 || messages[idx - 1]?.role === 'user');
+          return (
+            <Fragment key={msg.id}>
+              {isReplyAnchor && <div ref={newReplyAnchorRef} className="h-0" />}
+              <div className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div
+                  className="max-w-[90%] rounded-xl px-3 py-2 text-sm whitespace-pre-wrap"
+                  style={{
+                    background: msg.role === 'user' ? 'var(--accent)' : 'var(--bg-tertiary)',
+                    color: msg.role === 'user' ? 'white' : 'var(--text-primary)',
+                  }}
+                >
+                  {msg.reactThought && (
+                    <details className="mb-1">
+                      <summary className="text-[10px] cursor-pointer" style={{ color: 'var(--text-muted)' }}>
+                        🧠 思考过程
+                      </summary>
+                      <p className="text-[10px] mt-1 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+                        {msg.reactThought}
+                      </p>
+                    </details>
+                  )}
+                  {msg.content}
+                  {msg.skillName === 'styleConfirm' && msg.confirmRequired && !msg.confirmed && (
+                    <div className="flex flex-wrap gap-1.5 mt-3">
+                      {PRESET_STYLES.map((style) => (
+                        <button
+                          key={style.styleId}
+                          onClick={() => handleStyleSelect(style, msg.id)}
+                          className="px-2 py-1 rounded-lg text-xs transition-colors hover:brightness-110"
+                          style={{
+                            background: 'var(--bg-secondary)',
+                            color: 'var(--text-primary)',
+                            border: '1px solid var(--border)',
+                          }}
+                        >
+                          {style.styleName}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          </div>
-        ))}
+              </div>
+            </Fragment>
+          );
+        })}
 
         {/* ReAct status indicator */}
         {agentMode === 'react' && (reactLoop.status === 'thinking' || reactLoop.status === 'acting') && (
