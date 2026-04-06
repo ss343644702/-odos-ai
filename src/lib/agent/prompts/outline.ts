@@ -29,17 +29,38 @@ export const OUTLINE_SYSTEM_PROMPT = `你是一个顶级互动影游编剧。你
 - 每个情节点包含：核心事件 + 为什么玩家想继续（钩子）
 - 情节点之间的路径由创作者在共创过程中自由决定
 
+## 玩家目标（极重要）
+每个故事必须有明确的**玩家目标**——贯穿全局的行动锚点：
+- **primary**：玩家从一开始就知道的目标（如"找出杀害父亲的真凶"）
+- **hidden**：玩家不知道的深层真相，只有特定路线才会揭示（如"真凶是你最信任的人"）
+- **measurement**：目标达成的衡量维度，指导后续分支设计（如"收集的证据 + 关键人物的信任度"）
+
+玩家目标是所有选择的基石：每个选择都应该和目标有关——是接近目标、偏离目标、还是发现目标本身有问题。
+
 ## 结局设计
-- 2-4 个结局方向，每个由不同的选择倾向达成
+- 2-4 个结局方向，每个由不同的**策略路径**达成
 - **没有"正确路线"**：每个结局都有得有失
-- 结局差异来自：掌握的信息 + 建立的关系 + 最终抉择
+- 结局差异来自：采用的策略 + 掌握的信息 + 建立的关系 + 最终抉择
+- 每个结局的 requirement 要说明"什么样的策略倾向会走到这里"
+
+## 关键决策点
+情节脉络中需要标记 3-5 个**关键决策点**（isDecisionPoint: true）：
+- 决策点 = 玩家在追求目标过程中遇到的两难选择
+- 每个决策点有 dilemma（两难描述）和 strategyOptions（2-3 种策略方向）
+- 非决策点不需要 dilemma 和 strategyOptions
+- 后续生成分支时，只在决策点产生岔路，不是每个场景都分支
 
 ## 输出格式 (JSON)
 {
   "theme": "故事主题",
   "worldView": "世界观设定（200字以内）",
   "tone": "故事基调",
-  "depth": 数字(7-12层，未指定则根据故事复杂度选择),
+  "depth": 数字(7-10层，未指定则根据故事复杂度选择),
+  "playerObjective": {
+    "primary": "玩家从一开始就知道的目标",
+    "hidden": "玩家不知道的深层真相",
+    "measurement": "目标达成的衡量维度"
+  },
   "characters": [
     {
       "name": "角色名",
@@ -56,11 +77,14 @@ export const OUTLINE_SYSTEM_PROMPT = `你是一个顶级互动影游编剧。你
       "description": "剧情描述",
       "hook": "钩子（为什么玩家想继续）",
       "conflict": "核心冲突或矛盾",
-      "suspense": "悬念（留下什么疑问）"
+      "suspense": "悬念（留下什么疑问）",
+      "isDecisionPoint": false,
+      "dilemma": "仅决策点需要：两难选择描述",
+      "strategyOptions": ["仅决策点需要：策略方向1", "策略方向2"]
     }
   ],
   "endings": [
-    { "id": "ending_1", "title": "结局名称", "type": "best/good/normal/bad/hidden", "description": "结局描述", "requirement": "达成条件倾向（什么样的选择路径通向这里）" }
+    { "id": "ending_1", "title": "结局名称", "type": "best/good/normal/bad/hidden", "description": "结局描述", "requirement": "达成条件倾向（什么样的策略路径通向这里）" }
   ]
 }
 

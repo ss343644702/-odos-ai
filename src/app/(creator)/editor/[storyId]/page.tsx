@@ -9,6 +9,7 @@ import ParameterPanel from '@/components/creator/ParameterPanel';
 import PreviewModal from '@/components/creator/PreviewModal';
 import PublishDialog from '@/components/creator/PublishDialog';
 import { useStoryStore } from '@/stores/storyStore';
+import { useChatStore } from '@/stores/chatStore';
 import type { Story } from '@/types/story';
 
 const StoryCanvas = dynamic(() => import('@/components/creator/StoryCanvas'), {
@@ -31,11 +32,16 @@ export default function EditorPage() {
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const dbStoryId = useRef<string | null>(null);
 
-  // Wait for zustand persist rehydration
+  // Wait for zustand persist rehydration (both stores)
   useEffect(() => {
-    const unsub = useStoryStore.persist.onFinishHydration(() => setHydrated(true));
-    if (useStoryStore.persist.hasHydrated()) setHydrated(true);
-    return unsub;
+    let storyReady = useStoryStore.persist.hasHydrated();
+    let chatReady = useChatStore.persist.hasHydrated();
+    const check = () => { if (storyReady && chatReady) setHydrated(true); };
+
+    const unsub1 = useStoryStore.persist.onFinishHydration(() => { storyReady = true; check(); });
+    const unsub2 = useChatStore.persist.onFinishHydration(() => { chatReady = true; check(); });
+    check();
+    return () => { unsub1(); unsub2(); };
   }, []);
 
   // Load or create story
@@ -44,11 +50,9 @@ export default function EditorPage() {
 
     const init = async () => {
       if (storyId === 'new') {
-        // Create new draft in DB
-        const currentStory = useStoryStore.getState().story;
-        if (!currentStory) {
-          initStory('新影游', '');
-        }
+        // Always create a fresh empty story for /editor/new
+        initStory('新影游', '');
+        useChatStore.getState().clearMessages();
         try {
           const storyState = useStoryStore.getState().story;
           const res = await fetch('/api/stories', {

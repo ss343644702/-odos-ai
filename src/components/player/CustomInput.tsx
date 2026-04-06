@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { usePlayerStore } from '@/stores/playerStore';
 import { v4 as uuid } from 'uuid';
 import ButterflyLoading from './ButterflyLoading';
@@ -36,6 +36,7 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
   const story = usePlayerStore((s) => s.story);
   const session = usePlayerStore((s) => s.session);
   const isBranching = usePlayerStore((s) => s.isBranching);
+  const prefetchAbortRef = useRef<AbortController | null>(null);
 
   /** Background prefetch: generate narration + voice + TTS for stub nodes */
   const runPrefetch = useCallback(async (
@@ -45,13 +46,27 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
   ) => {
     if (nodesToPrefetch.length === 0) return;
 
+    // Deduplicate: skip nodes that already have full content
+    const existing = usePlayerStore.getState().story?.nodes || [];
+    const toProcess = nodesToPrefetch.filter((n: any) => {
+      const existingNode = existing.find((en) => en.id === n.id);
+      return !existingNode || needsPrefetch(existingNode);
+    });
+    if (toProcess.length === 0) return;
+
+    // Cancel any previous in-flight prefetch
+    prefetchAbortRef.current?.abort();
+    const abortController = new AbortController();
+    prefetchAbortRef.current = abortController;
+
     const buildBody = () => ({
       storyId,
-      nodes: nodesToPrefetch,
+      nodes: toProcess,
       worldView: story?.worldView || '',
+      playerObjective: story?.playerObjective || null,
       mainPlotNodeIds: story?.nodes?.filter((n) => n.type !== 'ai_generated').map((n) => n.id) || [],
       mainPlotNodes: story?.nodes?.filter((n) => n.type !== 'ai_generated').map((n) => ({
-        id: n.id, type: n.type, title: n.data.title, narration: n.data.narration?.slice(0, 100),
+        id: n.id, type: n.type, title: n.data.title, narration: n.data.narration?.slice(0, 200),
       })) || [],
       style: story?.style || null,
       entities: null,
@@ -65,11 +80,13 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
     });
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      if (abortController.signal.aborted) return;
       try {
         const res = await fetch('/api/branch-prefetch', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(buildBody()),
+          signal: abortController.signal,
         });
         if (!res.ok) {
           if (attempt < MAX_RETRIES) continue;
@@ -77,22 +94,26 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
         }
         const data = await res.json();
 
+        if (abortController.signal.aborted) return;
+
         for (const completed of (data.completedNodes || [])) {
           updateGeneratedNode(completed.nodeId, completed.data);
         }
 
         const newExtras = data.newExtraNodes || [];
         if (newExtras.length > 0) {
-          const existing = usePlayerStore.getState().story?.nodes || [];
-          const fresh = newExtras.filter((n: any) => !existing.some((en) => en.id === n.id));
+          const currentNodes = usePlayerStore.getState().story?.nodes || [];
+          const fresh = newExtras.filter((n: any) => !currentNodes.some((en) => en.id === n.id));
           if (fresh.length > 0) addGeneratedNodes(fresh);
+          // Only prefetch 1 level deep (immediate next choices), not recursive
           const incomplete = fresh.filter((n: any) => needsPrefetch(n));
-          if (incomplete.length > 0 && branchDepth < 5) {
+          if (incomplete.length > 0 && branchDepth < 1) {
             runPrefetch(incomplete, branchDepth + 1, convergenceTarget);
           }
         }
         return; // Success
-      } catch {
+      } catch (err: any) {
+        if (err?.name === 'AbortError') return;
         if (attempt >= MAX_RETRIES) return;
       }
     }
@@ -100,26 +121,65 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
 
   /** Call pipeline with retry */
   const callPipeline = useCallback(async (text: string) => {
-    const buildBody = () => ({
-      storyId,
-      currentNodeId: nodeId,
-      playerInput: text,
-      history: session?.history || [],
-      worldView: story?.worldView || '',
-      mainPlotNodeIds: story?.nodes?.filter((n) => n.type !== 'ai_generated').map((n) => n.id) || [],
-      mainPlotNodes: story?.nodes?.filter((n) => n.type !== 'ai_generated').map((n) => ({
-        id: n.id, type: n.type, title: n.data.title, narration: n.data.narration?.slice(0, 100),
-        choices: n.data.choices?.map((c) => ({ targetNodeId: c.targetNodeId })),
-      })) || [],
-      existingChoices: story?.nodes?.find((n) => n.id === nodeId)?.data.choices || [],
-      currentNodeContext: (() => {
-        const node = story?.nodes?.find((n) => n.id === nodeId);
-        return node ? { title: node.data.title, narration: node.data.narration, dialogue: node.data.dialogue, character: node.data.character } : null;
-      })(),
-      style: story?.style || null,
-      entities: null,
-      defaultVoice: story?.settings?.defaultVoice || 'narrator',
-    });
+    const buildBody = () => {
+      const allNodes = story?.nodes || [];
+      const mainNodes = allNodes.filter((n) => n.type !== 'ai_generated');
+
+      // Build rich main plot nodes with choice text + connection info
+      const mainPlotNodes = mainNodes.map((n) => ({
+        id: n.id, type: n.type, title: n.data.title,
+        narration: n.data.narration?.slice(0, 150),
+        choices: n.data.choices?.map((c) => ({
+          id: c.id,
+          text: c.text,
+          targetNodeId: c.targetNodeId,
+        })),
+      }));
+
+      // Build recent AI narration chain: narration from AI-generated nodes in history
+      const hist = session?.history || [];
+      const recentAiNarrations = hist
+        .slice(-6)
+        .map((step) => {
+          const node = allNodes.find((n) => n.id === step.nodeId);
+          if (!node) return null;
+          return {
+            nodeId: node.id,
+            title: node.data.title,
+            narration: node.data.narration?.slice(0, 150),
+            wasCustomInput: !!step.customInput,
+            customInput: step.customInput || undefined,
+            isAiGenerated: node.type === 'ai_generated',
+          };
+        })
+        .filter(Boolean);
+
+      // Collect ending nodes for route_to_ending
+      const endingNodes = allNodes
+        .filter((n) => n.type === 'ending')
+        .map((n) => ({ id: n.id, title: n.data.title, narration: n.data.narration?.slice(0, 200) }));
+
+      return {
+        storyId,
+        currentNodeId: nodeId,
+        playerInput: text,
+        history: hist,
+        recentAiNarrations,
+        worldView: story?.worldView || '',
+        playerObjective: story?.playerObjective || null,
+        mainPlotNodeIds: mainNodes.map((n) => n.id),
+        mainPlotNodes,
+        endingNodes,
+        existingChoices: allNodes.find((n) => n.id === nodeId)?.data.choices || [],
+        currentNodeContext: (() => {
+          const node = allNodes.find((n) => n.id === nodeId);
+          return node ? { title: node.data.title, narration: node.data.narration, dialogue: node.data.dialogue, character: node.data.character } : null;
+        })(),
+        style: story?.style || null,
+        entities: null,
+        defaultVoice: story?.settings?.defaultVoice || 'narrator',
+      };
+    };
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
@@ -145,6 +205,8 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
     if (!text || isBranching) return;
 
     setInput('');
+    // Cancel any in-flight prefetch before starting new pipeline
+    prefetchAbortRef.current?.abort();
     // Show loading IMMEDIATELY
     setBranching(true);
     submitCustomInput(text);
@@ -206,7 +268,7 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
       return;
     }
 
-    if ((result.action === 'converge_to_main' || result.action === 'new_ending') && result.newNodes) {
+    if ((result.action === 'converge_to_main' || result.action === 'route_to_ending') && result.newNodes) {
       const mainNode = result.newNodes[0];
 
       // Verify main node is fully ready (has narration + voice)

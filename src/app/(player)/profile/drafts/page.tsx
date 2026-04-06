@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { getSupabaseBrowser } from '@/lib/supabase';
 
@@ -17,6 +17,11 @@ export default function DraftsPage() {
   const [drafts, setDrafts] = useState<DraftItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  // Batch mode state
+  const [batchMode, setBatchMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [batchDeleting, setBatchDeleting] = useState(false);
 
   useEffect(() => {
     const load = async () => {
@@ -46,6 +51,42 @@ export default function DraftsPage() {
     setDeletingId(null);
   };
 
+  const toggleSelect = useCallback((id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const toggleSelectAll = useCallback(() => {
+    if (selected.size === drafts.length) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(drafts.map((d) => d.id)));
+    }
+  }, [selected.size, drafts]);
+
+  const handleBatchDelete = useCallback(async () => {
+    if (selected.size === 0) return;
+    if (!confirm(`确定删除选中的 ${selected.size} 个草稿吗？`)) return;
+    setBatchDeleting(true);
+    const ids = Array.from(selected);
+    await Promise.allSettled(
+      ids.map((id) => fetch(`/api/stories/${id}`, { method: 'DELETE' }))
+    );
+    setDrafts((prev) => prev.filter((d) => !selected.has(d.id)));
+    setSelected(new Set());
+    setBatchMode(false);
+    setBatchDeleting(false);
+  }, [selected]);
+
+  const exitBatchMode = useCallback(() => {
+    setBatchMode(false);
+    setSelected(new Set());
+  }, []);
+
   const formatDate = (dateStr: string) => {
     const d = new Date(dateStr);
     return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
@@ -60,9 +101,77 @@ export default function DraftsPage() {
             <path d="M15 18l-6-6 6-6" />
           </svg>
         </button>
-        <h1 className="text-base font-bold" style={{ color: 'var(--text-primary)' }}>草稿箱</h1>
-        <span className="text-xs" style={{ color: 'var(--text-muted)' }}>({drafts.length})</span>
+        <h1 className="text-base font-bold flex-1" style={{ color: 'var(--text-primary)' }}>
+          草稿箱<span className="font-normal" style={{ color: 'var(--text-muted)' }}>({drafts.length})</span>
+        </h1>
+
+        {/* Batch mode toggle */}
+        {drafts.length > 0 && !loading && (
+          batchMode ? (
+            <button
+              onClick={exitBatchMode}
+              className="text-xs px-2.5 py-1 rounded-md"
+              style={{ color: 'var(--accent)' }}
+            >
+              取消
+            </button>
+          ) : (
+            <button
+              onClick={() => setBatchMode(true)}
+              className="text-xs px-2.5 py-1 rounded-md"
+              style={{ color: 'var(--text-secondary)' }}
+            >
+              管理
+            </button>
+          )
+        )}
       </div>
+
+      {/* Batch action bar */}
+      {batchMode && (
+        <div
+          className="flex items-center justify-between px-4 py-2 sticky top-[52px] z-10"
+          style={{ background: 'rgba(12,12,16,0.95)', borderBottom: '1px solid var(--border)' }}
+        >
+          <button
+            onClick={toggleSelectAll}
+            className="flex items-center gap-2 text-xs"
+            style={{ color: 'var(--text-secondary)' }}
+          >
+            <span
+              className="w-4 h-4 rounded border flex items-center justify-center"
+              style={{
+                borderColor: selected.size === drafts.length ? 'var(--accent)' : 'var(--border)',
+                background: selected.size === drafts.length ? 'var(--accent)' : 'transparent',
+              }}
+            >
+              {selected.size === drafts.length && (
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+              )}
+            </span>
+            全选
+          </button>
+          <div className="flex items-center gap-3">
+            <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
+              已选 {selected.size} 项
+            </span>
+            <button
+              onClick={handleBatchDelete}
+              disabled={selected.size === 0 || batchDeleting}
+              className="text-xs px-3 py-1.5 rounded-md font-medium"
+              style={{
+                background: selected.size > 0 ? 'var(--danger)' : 'var(--bg-tertiary)',
+                color: selected.size > 0 ? 'white' : 'var(--text-muted)',
+                opacity: batchDeleting ? 0.6 : 1,
+              }}
+            >
+              {batchDeleting ? '删除中...' : '删除'}
+            </button>
+          </div>
+        </div>
+      )}
 
       {loading ? (
         <div className="flex items-center justify-center py-20" style={{ color: 'var(--text-muted)' }}>
@@ -82,11 +191,34 @@ export default function DraftsPage() {
             <div
               key={draft.id}
               className="flex gap-3 rounded-xl overflow-hidden"
-              style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border)' }}
+              style={{
+                background: 'var(--bg-secondary)',
+                border: `1px solid ${batchMode && selected.has(draft.id) ? 'var(--accent)' : 'var(--border)'}`,
+              }}
+              onClick={batchMode ? () => toggleSelect(draft.id) : undefined}
             >
+              {/* Batch checkbox */}
+              {batchMode && (
+                <div className="flex items-center pl-3">
+                  <span
+                    className="w-5 h-5 rounded border flex items-center justify-center flex-shrink-0"
+                    style={{
+                      borderColor: selected.has(draft.id) ? 'var(--accent)' : 'var(--border)',
+                      background: selected.has(draft.id) ? 'var(--accent)' : 'transparent',
+                    }}
+                  >
+                    {selected.has(draft.id) && (
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3">
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                    )}
+                  </span>
+                </div>
+              )}
+
               <div
-                className="w-24 h-24 flex-shrink-0 flex items-center justify-center cursor-pointer"
-                onClick={() => router.push(`/editor/${draft.id}`)}
+                className={`w-24 h-24 flex-shrink-0 flex items-center justify-center ${!batchMode ? 'cursor-pointer' : ''}`}
+                onClick={!batchMode ? () => router.push(`/editor/${draft.id}?from=drafts`) : undefined}
                 style={{
                   background: draft.coverImageUrl
                     ? `url(${draft.coverImageUrl}) center/cover`
@@ -103,9 +235,9 @@ export default function DraftsPage() {
               <div className="flex-1 py-2.5 pr-2 flex flex-col justify-between">
                 <div>
                   <h3
-                    className="text-sm font-medium truncate cursor-pointer"
+                    className={`text-sm font-medium truncate ${!batchMode ? 'cursor-pointer' : ''}`}
                     style={{ color: 'var(--text-primary)' }}
-                    onClick={() => router.push(`/editor/${draft.id}`)}
+                    onClick={!batchMode ? () => router.push(`/editor/${draft.id}?from=drafts`) : undefined}
                   >
                     {draft.title || '无标题'}
                   </h3>
@@ -117,23 +249,25 @@ export default function DraftsPage() {
                   <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
                     {formatDate(draft.updatedAt)}
                   </span>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => router.push(`/editor/${draft.id}`)}
-                      className="text-[11px] px-2.5 py-1 rounded-md"
-                      style={{ background: 'var(--accent)', color: 'white' }}
-                    >
-                      编辑
-                    </button>
-                    <button
-                      onClick={() => handleDelete(draft.id)}
-                      disabled={deletingId === draft.id}
-                      className="text-[11px] px-2.5 py-1 rounded-md"
-                      style={{ background: 'var(--bg-tertiary)', color: 'var(--danger)' }}
-                    >
-                      {deletingId === draft.id ? '...' : '删除'}
-                    </button>
-                  </div>
+                  {!batchMode && (
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => router.push(`/editor/${draft.id}?from=drafts`)}
+                        className="text-[11px] px-2.5 py-1 rounded-md"
+                        style={{ background: 'var(--accent)', color: 'white' }}
+                      >
+                        编辑
+                      </button>
+                      <button
+                        onClick={() => handleDelete(draft.id)}
+                        disabled={deletingId === draft.id}
+                        className="text-[11px] px-2.5 py-1 rounded-md"
+                        style={{ background: 'var(--bg-tertiary)', color: 'var(--danger)' }}
+                      >
+                        {deletingId === draft.id ? '...' : '删除'}
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

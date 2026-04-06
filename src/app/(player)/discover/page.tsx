@@ -25,8 +25,8 @@ export default function DiscoverPage() {
             title: s.title,
             description: s.description,
             coverUrl: s.coverImageUrl || null,
-            nodeCount: 0, // Not available in list query
-            endingCount: 0,
+            authorName: s.author?.nickname || '匿名创作者',
+            authorAvatar: s.author?.avatarUrl || null,
             playCount: s.playCount || 0,
           })),
         );

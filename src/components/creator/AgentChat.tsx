@@ -5,10 +5,9 @@ import { useChatStore } from '@/stores/chatStore';
 import { useStoryStore } from '@/stores/storyStore';
 import { useEditorStore } from '@/stores/editorStore';
 import { PRESET_STYLES } from '@/lib/agent/types';
-import type { SkillName, AgentMode, PendingExpansion } from '@/lib/agent/types';
+import type { SkillName, PendingExpansion } from '@/lib/agent/types';
 import type { StoryNode, StoryEdge, StoryOutline } from '@/types/story';
-import { matchFastPath, SKILL_PIPELINE } from '@/lib/agent/intents';
-import type { IntentResult } from '@/lib/agent/intents';
+// Pipeline mode removed — ReAct only
 import { v4 as uuid } from 'uuid';
 import { useReactLoop } from '@/hooks/useReactLoop';
 import { layoutNodes } from '@/lib/layout';
@@ -134,8 +133,7 @@ export default function AgentChat() {
   const setNodesAndEdges = useStoryStore((s) => s.setNodesAndEdges);
   const setWorldView = useStoryStore((s) => s.setWorldView);
 
-  const agentMode = useChatStore((s) => s.agentMode);
-  const setAgentMode = useChatStore((s) => s.setAgentMode);
+  // ReAct mode only (pipeline removed)
 
   const story = useStoryStore((s) => s.story);
 
@@ -176,13 +174,17 @@ export default function AgentChat() {
   }, [messages]);
 
   // Auto-derive skill progress from actual story data (on mount + data changes)
+  // Skip for empty stories (fresh /editor/new) to avoid false positives from stale hydration
   useEffect(() => {
     if (!story) return;
+    const contentNodes = (story.nodes || []).filter(n => n.type !== 'story_config');
+    // Don't sync skills for empty projects — let the creation flow manage it
+    if (contentNodes.length === 0) return;
     const { orchestrator: orch } = useChatStore.getState();
     // Don't override while agent is actively running
     if (orch.skills.some(s => s.status === 'running')) return;
 
-    const nodes = (story.nodes || []).filter(n => n.type !== 'story_config');
+    const nodes = contentNodes;
     const hasStyle = !!story.style?.styleId;
     const hasNodes = nodes.length > 0;
     const hasEdges = (story.edges || []).length > 0;
@@ -1333,6 +1335,8 @@ export default function AgentChat() {
     }
   }, [orchestrator.storyDescription, orchestrator.style, runOutlineGeneration, runBranchGeneration, runEntityExtraction, runStoryboardGeneration, runVoiceGeneration]);
 
+  // [Pipeline functions removed — all handled by ReAct tools]
+  /* --- DEAD PIPELINE CODE START (kept for reference, wrapped in false block) ---
   const getNextPipelineAction = useCallback(() => {
     const currentSkill = orchestrator.currentSkill;
     const skills = orchestrator.skills;
@@ -1558,6 +1562,7 @@ export default function AgentChat() {
       setStreaming(false);
     }, 300);
   }, [setStoryDescription, initStory, setStreaming, setCurrentSkill, updateSkillStatus, addMessage]);
+  --- DEAD PIPELINE CODE END */
 
   const handleSend = useCallback(async () => {
     const text = input.trim();
@@ -1565,188 +1570,48 @@ export default function AgentChat() {
 
     setInput('');
 
-    // ========== ReAct Mode ==========
-    if (agentMode === 'react') {
+    // ========== Meta actions (mode-independent) ==========
+    const lowerText = text.trim().toLowerCase();
+    if (/^(清空故事|清空|重新开始|从头开始|重头开始|新故事|创建新故事)$/.test(lowerText)) {
       addMessage({ role: 'user', content: text });
-      if (reactLoop.status === 'waiting_user') {
-        reactLoop.resumeLoop(text);
-      } else {
-        // Determine mode: edit only if story creation is fully complete
-        const story = useStoryStore.getState().story;
-        const contentNodes = story ? (story.nodes || []).filter((n: any) => n.type !== 'story_config') : [];
-        const hasNodes = contentNodes.length > 0;
-        const creationComplete = hasNodes && contentNodes.every(
-          (n: any) => (n.data.frames?.length > 0) && (n.data.voiceSegments?.length > 0)
-        );
-        const { orchestrator } = useChatStore.getState();
-        if (!orchestrator.storyDescription && !hasNodes) {
-          useChatStore.getState().setStoryDescription(text);
-        }
-        reactLoop.startLoop(text, creationComplete ? 'edit' : 'create');
-      }
+      // Clear everything: nodes, edges, orchestrator, messages
+      useStoryStore.getState().setNodesAndEdges([], []);
+      useChatStore.getState().clearMessages();
+      addMessage({
+        role: 'assistant',
+        content: '已清空所有内容，可以重新开始。告诉我你想创作什么故事吧！',
+      });
       return;
     }
 
-    // ========== Pipeline Mode (existing logic) ==========
+    // ========== ReAct Mode (only mode) ==========
     addMessage({ role: 'user', content: text });
+    // Resume if loop has existing progress — don't reset completed skills
+    const hasExistingProgress = useChatStore.getState().orchestrator.skills.some(s => s.status === 'completed');
+    const isRunning = reactLoop.status === 'thinking' || reactLoop.status === 'acting';
 
-    // --- Interactive branch mode: intercept input before normal flow ---
-    const ib = orchestrator.interactiveBranch;
-    if (ib.active && ib.phase === 'waiting_creator') {
-      await handleInteractiveBranchInput(text);
-      return;
-    }
-
-    // --- Mode selection after outline confirmation ---
-    if (orchestrator.currentSkill === 'outlineGenerator' && orchestrator.outline) {
-      const lower = text.trim().toLowerCase();
-      if (lower === '1' || lower.includes('共创')) {
-        updateSkillStatus('outlineGenerator', 'completed');
-        runInteractiveBranch();
-        return;
-      }
-      if (lower === '2' || lower.includes('快速')) {
-        updateSkillStatus('outlineGenerator', 'completed');
-        runBranchGeneration();
-        return;
-      }
-      // Otherwise fall through to normal intent classification (e.g. user wants to modify outline)
-    }
-
-    // --- Fast-path: only the simplest unambiguous commands ---
-    const fastResult = matchFastPath(text);
-    if (fastResult) {
-      switch (fastResult.intent) {
-        case 'continue_pipeline': {
-          // styleConfirm → treat "继续"/"确认" as selecting default style
-          if (orchestrator.currentSkill === 'styleConfirm') {
-            const selectedStyle = PRESET_STYLES[0];
-            setSelectedStyle(selectedStyle);
-            setStyle(selectedStyle);
-            updateSkillStatus('styleConfirm', 'completed');
-            runOutlineGeneration(orchestrator.storyDescription, selectedStyle);
-            return;
-          }
-          const handled = handleContinuePipeline();
-          if (!handled) {
-            // No story → ask user to describe a story
-            addMessage({
-              role: 'assistant',
-              content: '你还没有开始创作故事。告诉我你想创作什么故事吧！\n\n例如："一个3层深度的古代仙侠冒险故事"',
-            });
-          }
-          return;
-        }
-        case 'retry_current':
-          handleRetryCurrent();
-          return;
-        case 'rerun_step':
-          if (fastResult.params.targetSkill) {
-            handleRerunStep(fastResult.params.targetSkill);
-          }
-          return;
-        case 'new_story':
-          addMessage({
-            role: 'assistant',
-            content: '好的，我们重新开始。告诉我你想创作什么故事吧！',
-          });
-          useChatStore.getState().clearMessages();
-          return;
-      }
-    }
-
-    // --- All other messages: always classify intent via LLM ---
-    setStreaming(true);
-
-    // Special: if in styleConfirm, check if user is selecting a style first
-    if (orchestrator.currentSkill === 'styleConfirm') {
-      const matchedStyle = PRESET_STYLES.find(
-        (s) => text.includes(s.styleName) || text.includes(s.styleId)
+    if (hasExistingProgress && !isRunning) {
+      // Continue existing conversation — don't reset skills
+      reactLoop.resumeLoop(text);
+    } else if (!isRunning) {
+      // Fresh start — no existing progress
+      const story = useStoryStore.getState().story;
+      const contentNodes = story ? (story.nodes || []).filter((n: any) => n.type !== 'story_config') : [];
+      const hasNodes = contentNodes.length > 0;
+      const creationComplete = hasNodes && contentNodes.every(
+        (n: any) => (n.data.frames?.length > 0) && (n.data.voiceSegments?.length > 0)
       );
-      if (matchedStyle) {
-        setSelectedStyle(matchedStyle);
-        setStyle(matchedStyle);
-        updateSkillStatus('styleConfirm', 'completed');
-        setStreaming(false);
-        runOutlineGeneration(orchestrator.storyDescription, matchedStyle);
-        return;
+      const { orchestrator: orch } = useChatStore.getState();
+      if (!orch.storyDescription && !hasNodes) {
+        useChatStore.getState().setStoryDescription(text);
       }
-      // Not a style name → classify intent (user might want to change story, ask question, etc.)
-    }
-
-    const classified = await classifyIntent(text);
-    setStreaming(false);
-
-    switch (classified.intent) {
-      case 'create_story': {
-        const desc = classified.params.description || text;
-        const depth = classified.params.depth ? Number(classified.params.depth) : undefined;
-        const story = useStoryStore.getState().story;
-        const hasExistingStory = !!(story && (story.nodes || []).length > 0);
-        startStoryCreation(desc, hasExistingStory, text, depth);
-        break;
-      }
-      case 'continue_pipeline': {
-        if (orchestrator.currentSkill === 'styleConfirm') {
-          // User said something like "开始吧" during style selection → use default
-          const selectedStyle = PRESET_STYLES[0];
-          setSelectedStyle(selectedStyle);
-          setStyle(selectedStyle);
-          updateSkillStatus('styleConfirm', 'completed');
-          runOutlineGeneration(orchestrator.storyDescription, selectedStyle);
-        } else {
-          handleContinuePipeline();
-        }
-        break;
-      }
-      case 'retry_current':
-        handleRetryCurrent();
-        break;
-      case 'rerun_step':
-        if (classified.params.targetSkill) {
-          handleRerunStep(classified.params.targetSkill as SkillName);
-        } else {
-          handleRetryCurrent();
-        }
-        break;
-      case 'edit_node':
-        handleEditNode(classified.params);
-        break;
-      case 'new_story':
-        useChatStore.getState().clearMessages();
-        addMessage({
-          role: 'assistant',
-          content: '好的，我们重新开始。告诉我你想创作什么故事吧！',
-        });
-        break;
-      case 'general_chat':
-      default:
-        await handleGeneralChat(text);
-        break;
+      reactLoop.startLoop(text, creationComplete ? 'edit' : 'create');
     }
   }, [
     input,
     isStreaming,
-    orchestrator,
     addMessage,
-    setStreaming,
-    setCurrentSkill,
-    updateSkillStatus,
-    setStoryDescription,
-    initStory,
-    setStyle,
-    setSelectedStyle,
-    runOutlineGeneration,
-    classifyIntent,
-    startStoryCreation,
-    handleContinuePipeline,
-    handleRetryCurrent,
-    handleRerunStep,
-    handleEditNode,
-    handleGeneralChat,
-    handleInteractiveBranchInput,
-    runInteractiveBranch,
-    runBranchGeneration,
+    reactLoop,
   ]);
 
   // Style button click handler (used to avoid code duplication)
@@ -1776,19 +1641,8 @@ export default function AgentChat() {
     >
       {/* Header: Mode toggle + Step progress */}
       <div style={{ borderBottom: '1px solid var(--border)' }}>
-        {/* Row 1: Mode toggle */}
-        <div className="flex items-center justify-between px-3 py-1.5">
-          <button
-            onClick={() => setAgentMode(agentMode === 'pipeline' ? 'react' : 'pipeline')}
-            className="shrink-0 px-2.5 py-1 rounded text-[11px] font-medium transition-colors"
-            style={{
-              background: agentMode === 'react' ? 'var(--accent)' : 'var(--bg-tertiary)',
-              color: agentMode === 'react' ? 'white' : 'var(--text-secondary)',
-            }}
-            title={agentMode === 'react' ? '切换到 Pipeline 模式' : '切换到 ReAct 模式'}
-          >
-            {agentMode === 'react' ? '🧠 ReAct' : '⚡ Pipeline'}
-          </button>
+        {/* Row 1: Progress */}
+        <div className="flex items-center justify-end px-3 py-1.5">
           <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
             {orchestrator.skills.filter(s => s.status === 'completed').length}/{orchestrator.skills.length} 完成
           </span>
@@ -1887,7 +1741,7 @@ export default function AgentChat() {
         })}
 
         {/* ReAct status indicator */}
-        {agentMode === 'react' && (reactLoop.status === 'thinking' || reactLoop.status === 'acting') && (
+        {(reactLoop.status === 'thinking' || reactLoop.status === 'acting') && (
           <div className="flex justify-start">
             <div
               className="rounded-xl px-3 py-2 text-sm"
@@ -1908,17 +1762,7 @@ export default function AgentChat() {
           </div>
         )}
 
-        {/* Pipeline streaming indicator */}
-        {isStreaming && agentMode === 'pipeline' && (
-          <div className="flex justify-start">
-            <div
-              className="rounded-xl px-3 py-2 text-sm"
-              style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' }}
-            >
-              <span className="animate-pulse">思考中...</span>
-            </div>
-          </div>
-        )}
+        {/* Pipeline streaming indicator removed */}
 
         <div ref={messagesEndRef} />
       </div>
@@ -1946,7 +1790,7 @@ export default function AgentChat() {
             }}
             placeholder="描述你的故事..."
           />
-          {agentMode === 'react' && (reactLoop.status === 'thinking' || reactLoop.status === 'acting') ? (
+          {(reactLoop.status === 'thinking' || reactLoop.status === 'acting') ? (
             <button
               onClick={reactLoop.abort}
               className="p-2 rounded-lg transition-colors"

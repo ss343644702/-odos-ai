@@ -159,7 +159,7 @@ ${wrapPlayerInput(safeInput)}
     };
 
     return NextResponse.json<BranchResponse>({
-      action: isEnding ? 'new_ending' : 'converge_to_main',
+      action: isEnding ? 'route_to_ending' : 'converge_to_main',
       newNodes: [newNode],
       transitionNarration: decision.narration || `你决定${safeInput}...`,
     });

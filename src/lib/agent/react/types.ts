@@ -19,6 +19,7 @@ export type ToolName =
   | 'manage_choice'
   | 'manage_frame'
   | 'list_nodes'
+  | 'edit_outline'
   | 'reset_story'
   | 'get_state'
   | 'ask_user';
@@ -59,7 +60,7 @@ export interface ReactModelConfig {
 }
 
 export const DEFAULT_REACT_CONFIG: ReactModelConfig = {
-  modelId: 'deepseek-chat',
+  modelId: 'deepseek/deepseek-chat-v3',
   maxTurns: 30,
   temperature: 0.3,
   maxTokens: 2048,

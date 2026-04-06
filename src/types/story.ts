@@ -4,6 +4,12 @@
 
 // ---------- Story ----------
 
+export interface PlayerObjective {
+  primary: string;
+  hidden: string;
+  measurement: string;
+}
+
 export interface Story {
   id: string;
   title: string;
@@ -17,7 +23,8 @@ export interface Story {
   edges: StoryEdge[];
   settings: StorySettings;
   worldView: string;
-  style: StyleConfig;
+  style: StyleConfig | null;
+  playerObjective?: PlayerObjective | null;
 }
 
 export interface StorySettings {
@@ -105,6 +112,9 @@ export interface StoryNodeData {
   metadata: {
     tags: string[];
     storyContext: string;
+    convergenceTarget?: string;   // For converge_bridge nodes: target mainline node ID
+    convergenceHint?: string;     // Hint for bridge narration direction
+    bridgeDepth?: number;         // How many bridge steps taken so far
   };
 }
 
@@ -225,7 +235,7 @@ export interface PlayStep {
 
 // ---------- AI Branch (C-side) ----------
 
-export type BranchAction = 'reject' | 'navigate_existing' | 'converge_to_main' | 'new_ending';
+export type BranchAction = 'reject' | 'navigate_existing' | 'converge_to_main' | 'route_to_ending';
 
 export interface BranchRequest {
   storyId: string;
@@ -264,6 +274,11 @@ export interface StoryOutline {
   worldView: string;
   tone: string;
   depth: number;
+  playerObjective?: {
+    primary: string;         // Player's known goal
+    hidden: string;          // Hidden truth only revealed on certain paths
+    measurement: string;     // Dimensions for measuring goal progress
+  };
   characters: {
     name: string;
     role: string;
@@ -281,6 +296,8 @@ export interface StoryOutline {
     stakes?: string;
     conflict?: string;
     suspense?: string;
+    isDecisionPoint?: boolean;
+    strategyOptions?: string[];
   }[];
   narrativeRoutes?: {
     id: string;

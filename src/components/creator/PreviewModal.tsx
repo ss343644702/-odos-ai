@@ -43,7 +43,7 @@ export default function PreviewModal() {
           boxShadow: '0 0 60px rgba(108, 92, 231, 0.15)',
         }}
       >
-        <GameplayView />
+        <GameplayView isPreview />
       </div>
     </div>
   );

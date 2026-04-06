@@ -7,8 +7,8 @@ interface StoryCardProps {
   title: string;
   description: string;
   coverUrl: string | null;
-  nodeCount: number;
-  endingCount: number;
+  authorName: string;
+  authorAvatar: string | null;
   playCount: number;
 }
 
@@ -17,14 +17,10 @@ export default function StoryCard({
   title,
   description,
   coverUrl,
-  nodeCount,
-  endingCount,
+  authorName,
+  authorAvatar,
   playCount,
 }: StoryCardProps) {
-  // Random height for waterfall effect
-  const heights = [200, 240, 280, 220, 260];
-  const imgHeight = heights[id.charCodeAt(0) % heights.length];
-
   return (
     <Link
       href={`/play/${id}`}
@@ -34,11 +30,10 @@ export default function StoryCard({
         border: '1px solid var(--border)',
       }}
     >
-      {/* Cover image */}
+      {/* Cover image — 1:1 aspect ratio */}
       <div
-        className="w-full flex items-center justify-center"
+        className="w-full aspect-square flex items-center justify-center"
         style={{
-          height: imgHeight,
           background: coverUrl
             ? `url(${coverUrl}) center/cover`
             : `linear-gradient(135deg, var(--accent)20, var(--node-ending)20)`,
@@ -64,11 +59,19 @@ export default function StoryCard({
           {description}
         </p>
         <div
-          className="flex items-center gap-3 mt-2 text-[10px]"
+          className="flex items-center justify-between mt-2 text-[10px]"
           style={{ color: 'var(--text-muted)' }}
         >
-          <span>{nodeCount} 个场景</span>
-          <span>{endingCount} 个结局</span>
+          <span className="flex items-center gap-1">
+            {authorAvatar ? (
+              <img src={authorAvatar} alt="" className="w-3.5 h-3.5 rounded-full object-cover" />
+            ) : (
+              <span className="w-3.5 h-3.5 rounded-full flex items-center justify-center text-[8px]" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-muted)' }}>
+                {authorName.charAt(0)}
+              </span>
+            )}
+            {authorName}
+          </span>
           <span>{playCount} 次游玩</span>
         </div>
       </div>

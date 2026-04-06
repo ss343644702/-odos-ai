@@ -67,6 +67,12 @@ const GENERATION_TOOLS: ToolDescription[] = [
 // Edit tools (used in both create and edit modes)
 const EDIT_TOOLS: ToolDescription[] = [
   {
+    name: 'edit_outline',
+    description: '用自然语言修改已生成的大纲（角色、情节、结局、基调等）。修改后后续生成分支会使用新大纲。',
+    inputSchema: '{ "instruction": "修改指令，如：把主角改成女性、增加一个反派角色、把结局改成开放式" }',
+    outputHint: '返回修改后的完整大纲摘要',
+  },
+  {
     name: 'edit_node',
     description: '快速修改指定剧情节点的文字字段',
     inputSchema: '{ "nodeIndex": 节点序号, "field": "narration"|"title"|"dialogue"|"character"|"imagePrompt"|"allowCustomInput", "newValue": "新值" }',
@@ -182,6 +188,7 @@ Action Input: {}`;
 3. generate_outline → ask_user 展示**完整大纲**并询问创作方式
 
 **大纲确认后，询问用户选择创作方式：**
+- 如果用户要求修改大纲（改角色/情节/结局/主题/基调等），使用 edit_outline 修改后再次 ask_user 确认
 - **共创模式（推荐）**：逐节点对话共创
 - **快速模式**：AI 一次性生成
 

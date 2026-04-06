@@ -7,8 +7,8 @@ interface StoryItem {
   title: string;
   description: string;
   coverUrl: string | null;
-  nodeCount: number;
-  endingCount: number;
+  authorName: string;
+  authorAvatar: string | null;
   playCount: number;
 }
 

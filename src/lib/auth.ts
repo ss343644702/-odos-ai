@@ -19,6 +19,19 @@ export async function getOrCreateDbUser() {
         avatarUrl: authUser.user_metadata?.avatar_url || null,
       },
     });
+  } else {
+    // Sync profile fields from Supabase auth (avatar, nickname may change)
+    const newAvatar = authUser.user_metadata?.avatar_url || null;
+    const newNickname = authUser.user_metadata?.nickname || null;
+    const updates: Record<string, string | null> = {};
+    if (newAvatar && newAvatar !== dbUser.avatarUrl) updates.avatarUrl = newAvatar;
+    if (newNickname && newNickname !== dbUser.nickname) updates.nickname = newNickname;
+    if (Object.keys(updates).length > 0) {
+      dbUser = await prisma.user.update({
+        where: { id: dbUser.id },
+        data: updates,
+      });
+    }
   }
 
   return dbUser;

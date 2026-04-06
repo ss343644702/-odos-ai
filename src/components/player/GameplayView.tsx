@@ -21,7 +21,7 @@ function isStubNode(node: any): boolean {
   return !hasNarration && !hasVoice;
 }
 
-export default function GameplayView() {
+export default function GameplayView({ isPreview = false }: { isPreview?: boolean }) {
   const router = useRouter();
   const currentNode = usePlayerStore((s) => s.currentNode);
   const story = usePlayerStore((s) => s.story);
@@ -61,16 +61,23 @@ export default function GameplayView() {
     ? (voiceSegments[currentSegmentIndex]?.text || '')
     : (currentNode?.data.narration || '');
 
-  // Reset state when node changes
+  // Reset state when node changes (use history length to detect circular navigation A→B→A)
+  const historyLen = session?.history?.length ?? 0;
   useEffect(() => {
     setCurrentSegmentIndex(0);
-    setShowChoices(false);
     setDisplayedText('');
     setIsTyping(false);
     setWaitingForNode(false);
     const hasVoice = (currentNode?.data.voiceSegments?.length ?? 0) > 0;
+    const hasNarration = !!(currentNode?.data.narration);
     setNarrationDone(!hasVoice);
-  }, [currentNode?.id]);
+    // If no narration and no voice, show choices immediately
+    if (!hasNarration && !hasVoice) {
+      setShowChoices(true);
+    } else {
+      setShowChoices(false);
+    }
+  }, [currentNode?.id, historyLen]);
 
   // Typewriter effect
   useEffect(() => {
@@ -241,17 +248,19 @@ export default function GameplayView() {
 
       {/* Top bar */}
       <div className="flex items-center gap-2 px-3 py-3">
-        <button
-          onClick={() => router.push('/discover')}
-          className="p-1.5 rounded-full transition-colors"
-          style={{ color: 'var(--text-secondary)' }}
-          title="返回"
-        >
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M15 18l-6-6 6-6" />
-          </svg>
-        </button>
-        <span className="text-xs flex-1 truncate" style={{ color: 'var(--text-muted)' }}>{story.title}</span>
+        {!isPreview && (
+          <button
+            onClick={() => router.push('/discover')}
+            className="p-1.5 rounded-full transition-colors"
+            style={{ color: 'var(--text-secondary)' }}
+            title="返回主页"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M15 18l-6-6 6-6" />
+            </svg>
+          </button>
+        )}
+        <span className="text-sm font-medium flex-1 truncate" style={{ color: 'var(--text-primary)' }}>{story.title}</span>
         {session && session.history.length > 0 && (
           <button onClick={goBack} className="p-1.5 rounded-full" style={{ color: 'var(--text-secondary)' }} title="撤回上一步">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">

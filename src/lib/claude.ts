@@ -1,14 +1,17 @@
-// LLM API Client - Using DeepSeek as primary LLM
-// OpenAI-compatible API
-// With: tracing, retry with exponential backoff, model fallback
+// LLM API Client - Using OpenRouter SDK
+// With: tracing, retry with exponential backoff, MiniMax fallback
 
+import { OpenRouter } from '@openrouter/sdk';
 import { generateTraceId, estimateTokens, recordTrace } from './trace';
 
-const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || '';
-const DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions';
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
+const OPENROUTER_MODEL = 'deepseek/deepseek-chat-v3';
 
 const MINIMAX_API_KEY = process.env.MINIMAX_API_KEY || '';
 const MINIMAX_API_URL = 'https://api.minimaxi.chat/v1/text/chatcompletion_v2';
+
+// Shared OpenRouter client instance
+const openrouter = new OpenRouter({ apiKey: OPENROUTER_API_KEY });
 
 interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -24,9 +27,7 @@ const INITIAL_BACKOFF_MS = 1000;
 
 /** Determine if an error is transient (worth retrying) */
 function isTransientError(status: number, errorText: string): boolean {
-  // Rate limit, server errors, gateway timeouts
   if ([429, 500, 502, 503, 504].includes(status)) return true;
-  // Network-level errors
   if (errorText.includes('ECONNRESET') || errorText.includes('ETIMEDOUT')) return true;
   return false;
 }
@@ -36,136 +37,185 @@ async function sleep(ms: number): Promise<void> {
 }
 
 // ──────────────────────────────────────────────
-// Core fetch with retry
+// MiniMax fallback fetch (kept as raw fetch)
 // ──────────────────────────────────────────────
 
-async function fetchWithRetry(
-  url: string,
-  apiKey: string,
-  body: Record<string, unknown>,
+async function fetchMiniMax(
+  messages: ChatMessage[],
+  temperature: number,
+  maxTokens: number,
   traceId: string,
   skill?: string,
-): Promise<{ content: string; model: string }> {
-  const model = body.model as string;
-  const inputText = JSON.stringify(body.messages);
-  const inputTokens = estimateTokens(inputText);
+): Promise<string> {
+  const model = 'MiniMax-Text-01';
+  const inputTokens = estimateTokens(JSON.stringify(messages));
+  const start = Date.now();
+
+  const response = await fetch(MINIMAX_API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${MINIMAX_API_KEY}`,
+    },
+    body: JSON.stringify({ model, messages, temperature, max_tokens: maxTokens }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    recordTrace({
+      traceId, skill, model, inputTokensEstimate: inputTokens, outputTokensEstimate: 0,
+      latencyMs: Date.now() - start, status: 'error',
+      error: `${response.status}: ${errorText.slice(0, 200)}`,
+      timestamp: new Date().toISOString(),
+    });
+    throw new Error(`MiniMax API error: ${response.status} - ${errorText}`);
+  }
+
+  const result = await response.json();
+  const content = result.choices?.[0]?.message?.content || '';
+  recordTrace({
+    traceId, skill, model, inputTokensEstimate: inputTokens,
+    outputTokensEstimate: estimateTokens(content),
+    latencyMs: Date.now() - start, status: 'success',
+    timestamp: new Date().toISOString(),
+  });
+  return content;
+}
+
+// ──────────────────────────────────────────────
+// OpenRouter SDK call with retry
+// ──────────────────────────────────────────────
+
+async function callOpenRouter(
+  messages: ChatMessage[],
+  temperature: number,
+  maxTokens: number,
+  traceId: string,
+  skill?: string,
+  model?: string,
+): Promise<string> {
+  const modelId = model || OPENROUTER_MODEL;
+  const inputTokens = estimateTokens(JSON.stringify(messages));
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const start = Date.now();
-
     try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify(body),
+      const result = openrouter.callModel({
+        model: modelId,
+        instructions: messages.find(m => m.role === 'system')?.content,
+        input: messages.filter(m => m.role !== 'system').map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+        temperature,
+        maxOutputTokens: maxTokens,
       });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-
-        if (attempt < MAX_RETRIES && isTransientError(response.status, errorText)) {
-          const backoff = INITIAL_BACKOFF_MS * Math.pow(2, attempt);
-          recordTrace({
-            traceId,
-            skill,
-            model,
-            inputTokensEstimate: inputTokens,
-            outputTokensEstimate: 0,
-            latencyMs: Date.now() - start,
-            status: 'retry',
-            error: `${response.status}: ${errorText.slice(0, 200)}`,
-            retryCount: attempt + 1,
-            timestamp: new Date().toISOString(),
-          });
-          await sleep(backoff);
-          continue;
-        }
-
-        recordTrace({
-          traceId,
-          skill,
-          model,
-          inputTokensEstimate: inputTokens,
-          outputTokensEstimate: 0,
-          latencyMs: Date.now() - start,
-          status: 'error',
-          error: `${response.status}: ${errorText.slice(0, 200)}`,
-          retryCount: attempt,
-          timestamp: new Date().toISOString(),
-        });
-        throw new Error(`${model} API error: ${response.status} - ${errorText}`);
-      }
-
-      const result = await response.json();
-      const content = result.choices?.[0]?.message?.content || '';
-      const outputTokens = estimateTokens(content);
+      const text = await result.getText();
 
       recordTrace({
-        traceId,
-        skill,
-        model,
-        inputTokensEstimate: inputTokens,
-        outputTokensEstimate: outputTokens,
-        latencyMs: Date.now() - start,
-        status: 'success',
-        retryCount: attempt,
+        traceId, skill, model: modelId, inputTokensEstimate: inputTokens,
+        outputTokensEstimate: estimateTokens(text),
+        latencyMs: Date.now() - start, status: 'success', retryCount: attempt,
         timestamp: new Date().toISOString(),
       });
 
-      return { content, model };
-    } catch (error: any) {
-      // Network errors (not HTTP errors)
-      if (error.message?.includes('API error')) throw error; // Already logged above
+      return text;
+    } catch (err: any) {
+      const errMsg = err.message || String(err);
+      const status = err.status || 0;
 
-      if (attempt < MAX_RETRIES) {
-        const backoff = INITIAL_BACKOFF_MS * Math.pow(2, attempt);
+      if (attempt < MAX_RETRIES && isTransientError(status, errMsg)) {
         recordTrace({
-          traceId,
-          skill,
-          model,
-          inputTokensEstimate: inputTokens,
-          outputTokensEstimate: 0,
-          latencyMs: Date.now() - start,
-          status: 'retry',
-          error: error.message?.slice(0, 200),
-          retryCount: attempt + 1,
+          traceId, skill, model: modelId, inputTokensEstimate: inputTokens,
+          outputTokensEstimate: 0, latencyMs: Date.now() - start,
+          status: 'retry', error: errMsg.slice(0, 200), retryCount: attempt + 1,
           timestamp: new Date().toISOString(),
         });
-        await sleep(backoff);
+        await sleep(INITIAL_BACKOFF_MS * Math.pow(2, attempt));
         continue;
       }
 
       recordTrace({
-        traceId,
-        skill,
-        model,
-        inputTokensEstimate: inputTokens,
-        outputTokensEstimate: 0,
-        latencyMs: Date.now() - start,
-        status: 'error',
-        error: error.message?.slice(0, 200),
-        retryCount: attempt,
+        traceId, skill, model: modelId, inputTokensEstimate: inputTokens,
+        outputTokensEstimate: 0, latencyMs: Date.now() - start,
+        status: 'error', error: errMsg.slice(0, 200), retryCount: attempt,
         timestamp: new Date().toISOString(),
       });
-      throw error;
+      throw err;
     }
   }
 
-  throw new Error(`${model}: max retries exceeded`);
+  throw new Error(`${modelId}: max retries exceeded`);
 }
 
 // ──────────────────────────────────────────────
-// Public API: callLLM with DeepSeek → MiniMax fallback
+// OpenRouter SDK streaming call
 // ──────────────────────────────────────────────
 
-/** Skills that produce JSON (not free text) — enable JSON mode for these */
-const JSON_SKILLS = new Set([
-  'outlineGenerator', 'branchGenerator', 'entityExtractor',
-  'storyboardGenerator', 'voiceGenerator', 'expandNode',
-]);
+async function streamOpenRouter(
+  messages: ChatMessage[],
+  temperature: number,
+  maxTokens: number,
+  traceId: string,
+  onChunk: (text: string) => void,
+  onDone: () => void,
+  model?: string,
+): Promise<void> {
+  const modelId = model || OPENROUTER_MODEL;
+  const inputTokens = estimateTokens(JSON.stringify(messages));
+  const start = Date.now();
+
+  try {
+    const result = openrouter.callModel({
+      model: modelId,
+      instructions: messages.find(m => m.role === 'system')?.content,
+      input: messages.filter(m => m.role !== 'system').map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+      temperature,
+      maxOutputTokens: maxTokens,
+    });
+
+    let fullText = '';
+
+    // Use items-based streaming (replace by ID, don't accumulate)
+    for await (const item of result.getItemsStream()) {
+      if (item.type === 'message') {
+        const textContent = item.content?.find((c: { type: string }) => c.type === 'output_text');
+        if (textContent && 'text' in textContent) {
+          const newText = (textContent as any).text as string;
+          if (newText.length > fullText.length) {
+            const delta = newText.slice(fullText.length);
+            fullText = newText;
+            onChunk(delta);
+          }
+        }
+      }
+    }
+
+    // Fallback: if items-stream didn't capture text, get it directly
+    if (!fullText) {
+      fullText = await result.getText();
+      if (fullText) onChunk(fullText);
+    }
+
+    recordTrace({
+      traceId, model: modelId, inputTokensEstimate: inputTokens,
+      outputTokensEstimate: estimateTokens(fullText),
+      latencyMs: Date.now() - start, status: 'success',
+      timestamp: new Date().toISOString(),
+    });
+    onDone();
+  } catch (err: any) {
+    recordTrace({
+      traceId, model: modelId, inputTokensEstimate: inputTokens,
+      outputTokensEstimate: 0, latencyMs: Date.now() - start,
+      status: 'error', error: (err.message || '').slice(0, 200),
+      timestamp: new Date().toISOString(),
+    });
+    throw err;
+  }
+}
+
+// ──────────────────────────────────────────────
+// Public API: callLLM with OpenRouter → MiniMax fallback
+// ──────────────────────────────────────────────
 
 export async function callLLM(params: {
   systemPrompt: string;
@@ -179,43 +229,26 @@ export async function callLLM(params: {
     { role: 'user', content: params.userMessage },
   ];
   const traceId = generateTraceId();
-  const wantJson = params.skill ? JSON_SKILLS.has(params.skill) : false;
 
-  // Try DeepSeek first
   try {
-    const { content } = await fetchWithRetry(
-      DEEPSEEK_API_URL,
-      DEEPSEEK_API_KEY,
-      {
-        model: 'deepseek-chat',
-        messages,
-        temperature: params.temperature || 0.7,
-        max_tokens: params.maxTokens || 4096,
-        ...(wantJson ? { response_format: { type: 'json_object' } } : {}),
-      },
+    return await callOpenRouter(
+      messages,
+      params.temperature || 0.7,
+      params.maxTokens || 4096,
       traceId,
       params.skill,
     );
-    return content;
   } catch {
     // Fallback to MiniMax
-    if (!MINIMAX_API_KEY) throw new Error('DeepSeek failed and no MiniMax fallback configured');
-
-    console.log(`[LLM fallback] DeepSeek failed, trying MiniMax | ${traceId}`);
-    const { content } = await fetchWithRetry(
-      MINIMAX_API_URL,
-      MINIMAX_API_KEY,
-      {
-        model: 'MiniMax-Text-01',
-        messages,
-        temperature: params.temperature || 0.7,
-        max_tokens: params.maxTokens || 4096,
-        ...(wantJson ? { response_format: { type: 'json_object' } } : {}),
-      },
+    if (!MINIMAX_API_KEY) throw new Error('OpenRouter failed and no MiniMax fallback configured');
+    console.log(`[LLM fallback] OpenRouter failed, trying MiniMax | ${traceId}`);
+    return await fetchMiniMax(
+      messages,
+      params.temperature || 0.7,
+      params.maxTokens || 4096,
       traceId + '_fallback',
       params.skill,
     );
-    return content;
   }
 }
 
@@ -233,93 +266,16 @@ export async function callLLMStream(params: {
     { role: 'system', content: params.systemPrompt },
     { role: 'user', content: params.userMessage },
   ];
-
   const traceId = generateTraceId();
-  const start = Date.now();
 
-  const response = await fetch(DEEPSEEK_API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${DEEPSEEK_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: 'deepseek-chat',
-      messages,
-      temperature: params.temperature || 0.7,
-      max_tokens: params.maxTokens || 4096,
-      stream: true,
-      ...(params.jsonMode ? { response_format: { type: 'json_object' } } : {}),
-    }),
-  });
-
-  if (!response.ok || !response.body) {
-    recordTrace({
-      traceId,
-      model: 'deepseek-chat',
-      inputTokensEstimate: estimateTokens(JSON.stringify(messages)),
-      outputTokensEstimate: 0,
-      latencyMs: Date.now() - start,
-      status: 'error',
-      error: `Stream error: ${response.status}`,
-      timestamp: new Date().toISOString(),
-    });
-    throw new Error(`DeepSeek API stream error: ${response.status}`);
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let fullOutput = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-
-    for (const line of lines) {
-      if (line.startsWith('data: ')) {
-        const data = line.slice(6).trim();
-        if (data === '[DONE]') {
-          recordTrace({
-            traceId,
-            model: 'deepseek-chat',
-            inputTokensEstimate: estimateTokens(JSON.stringify(messages)),
-            outputTokensEstimate: estimateTokens(fullOutput),
-            latencyMs: Date.now() - start,
-            status: 'success',
-            timestamp: new Date().toISOString(),
-          });
-          params.onDone();
-          return;
-        }
-        try {
-          const parsed = JSON.parse(data);
-          const content = parsed.choices?.[0]?.delta?.content;
-          if (content) {
-            fullOutput += content;
-            params.onChunk(content);
-          }
-        } catch {
-          // skip malformed chunks
-        }
-      }
-    }
-  }
-
-  recordTrace({
+  await streamOpenRouter(
+    messages,
+    params.temperature || 0.7,
+    params.maxTokens || 4096,
     traceId,
-    model: 'deepseek-chat',
-    inputTokensEstimate: estimateTokens(JSON.stringify(messages)),
-    outputTokensEstimate: estimateTokens(fullOutput),
-    latencyMs: Date.now() - start,
-    status: 'success',
-    timestamp: new Date().toISOString(),
-  });
-  params.onDone();
+    params.onChunk,
+    params.onDone,
+  );
 }
 
 // Multi-turn call for ReAct agent — accepts full message array
@@ -331,23 +287,18 @@ export async function callLLMMultiTurn(params: {
   skill?: string;
 }): Promise<string> {
   const traceId = generateTraceId();
-  const { content } = await fetchWithRetry(
-    DEEPSEEK_API_URL,
-    DEEPSEEK_API_KEY,
-    {
-      model: params.model || 'deepseek-chat',
-      messages: params.messages,
-      temperature: params.temperature ?? 0.3,
-      max_tokens: params.maxTokens ?? 2048,
-    },
+  return await callOpenRouter(
+    params.messages,
+    params.temperature ?? 0.3,
+    params.maxTokens ?? 2048,
     traceId,
     params.skill || 'multi_turn',
+    params.model,
   );
-  return content;
 }
 
 // ============================================================
-// DeepSeek API Client — for ReAct agent
+// ReAct agent call (via OpenRouter SDK)
 // ============================================================
 
 export async function callDeepSeek(params: {
@@ -357,19 +308,14 @@ export async function callDeepSeek(params: {
   model?: string;
 }): Promise<string> {
   const traceId = generateTraceId();
-  const { content } = await fetchWithRetry(
-    DEEPSEEK_API_URL,
-    DEEPSEEK_API_KEY,
-    {
-      model: params.model || 'deepseek-chat',
-      messages: params.messages,
-      temperature: params.temperature ?? 0.3,
-      max_tokens: params.maxTokens ?? 2048,
-    },
+  return await callOpenRouter(
+    params.messages,
+    params.temperature ?? 0.3,
+    params.maxTokens ?? 2048,
     traceId,
     'react_agent',
+    params.model,
   );
-  return content;
 }
 
 // ============================================================
@@ -397,9 +343,7 @@ export function parseJsonFromResponse(text: string): any {
     // Continue to repairs
   }
 
-  // ═══ Attempt 2: Truncation repair only (most common case with JSON mode) ═══
-  // When using response_format: json_object, the JSON is syntactically valid
-  // but may be truncated due to max_tokens. Only close brackets.
+  // ═══ Attempt 2: Truncation repair only ═══
   try {
     const truncated = repairTruncatedJson(jsonStr);
     return JSON.parse(truncated);
@@ -407,47 +351,30 @@ export function parseJsonFromResponse(text: string): any {
     // Continue to aggressive repairs
   }
 
-  // ═══ Attempt 3: Markdown/formatting cleanup (for non-JSON-mode responses) ═══
+  // ═══ Attempt 3: Markdown/formatting cleanup ═══
   let cleaned = jsonStr;
 
-  // Strip Markdown bold/italic markers
   cleaned = cleaned.replace(/:\s*\*\*([^*\n]*)\*\*/g, ': "$1"');
   cleaned = cleaned.replace(/\*\*/g, '');
-
-  // Remove comments
   cleaned = cleaned.replace(/\/\/[^\n]*/g, '');
   cleaned = cleaned.replace(/\/\*[\s\S]*?\*\//g, '');
-
-  // Remove control characters
   cleaned = cleaned.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
-
-  // Remove trailing commas before ] or }
   cleaned = cleaned.replace(/,\s*([\]}])/g, '$1');
-
-  // Fix missing commas between objects/arrays
   cleaned = cleaned.replace(/\}(\s*)\{/g, '},$1{');
   cleaned = cleaned.replace(/\](\s*)\[/g, '],$1[');
-
-  // Fix missing commas after } or ] before next key
   cleaned = cleaned.replace(/(\}|\])(\s*\n\s*)"(?=[a-zA-Z_])/g, '$1,$2"');
-
-  // Fix missing commas between string values
   cleaned = cleaned.replace(/"(\s*\n\s*)"(?=[a-zA-Z_])/g, '",$1"');
 
   try {
     return JSON.parse(cleaned);
   } catch {
-    // Try with truncation repair on cleaned version
     try {
       return JSON.parse(repairTruncatedJson(cleaned));
     } catch {}
   }
 
-  // ═══ Attempt 4: Last resort — aggressive fixes for badly formatted output ═══
-  // Quote unquoted keys: { theme: "value" } → { "theme": "value" }
+  // ═══ Attempt 4: Last resort — aggressive fixes ═══
   cleaned = cleaned.replace(/([{,]\s*)([a-zA-Z_][\w]*)\s*:/g, '$1"$2":');
-
-  // Wrap unquoted string values (only if clearly not a valid JSON value)
   cleaned = cleaned.replace(
     /("[\w\u4e00-\u9fff]+")\s*:\s*(?!["'{\[\d\-tfn])([^\n,\]}"[\]]+)/g,
     (_, key, val) => `${key}: "${val.trim()}"`,
@@ -456,7 +383,6 @@ export function parseJsonFromResponse(text: string): any {
   try {
     return JSON.parse(repairTruncatedJson(cleaned));
   } catch (e: any) {
-    // Debug: write to /tmp for inspection
     try {
       const fs = require('fs');
       fs.writeFileSync('/tmp/llm-json-fail.txt',
@@ -466,15 +392,9 @@ export function parseJsonFromResponse(text: string): any {
   }
 }
 
-/**
- * Repair truncated JSON by closing unclosed brackets/braces.
- * Handles: trailing commas, unclosed strings, missing ] and }.
- */
 function repairTruncatedJson(json: string): string {
   let s = json;
 
-  // Remove trailing incomplete string value (unclosed quote)
-  // Find if we have an odd number of unescaped quotes
   let inString = false;
   let lastStringStart = -1;
   for (let i = 0; i < s.length; i++) {
@@ -484,45 +404,21 @@ function repairTruncatedJson(json: string): string {
     }
   }
   if (inString && lastStringStart >= 0) {
-    // We're inside an unclosed string — truncate to last complete value
-    // Try to find the last complete property by going back to last good closing quote
     const beforeString = s.slice(0, lastStringStart);
-    // Check if this is a value (after :) or a key
     const beforeTrimmed = beforeString.trimEnd();
     if (beforeTrimmed.endsWith(':')) {
-      // It's a value — close the string and remove the key-value pair
-      // Go back further to remove the key too
       const lastComma = beforeTrimmed.lastIndexOf(',');
       const lastBracket = Math.max(beforeTrimmed.lastIndexOf('{'), beforeTrimmed.lastIndexOf('['));
       s = s.slice(0, Math.max(lastComma, lastBracket) + 1);
     } else if (beforeTrimmed.endsWith(',') || beforeTrimmed.endsWith('[') || beforeTrimmed.endsWith('{')) {
-      // It's a key in a new property — remove back to the comma/bracket
       s = beforeTrimmed;
     } else {
-      // Close the string
       s += '"';
     }
   }
 
-  // Remove trailing comma
   s = s.replace(/,\s*$/, '');
 
-  // Close unclosed brackets and braces
-  const open = { '{': 0, '[': 0 };
-  inString = false;
-  for (let i = 0; i < s.length; i++) {
-    if (s[i] === '"' && (i === 0 || s[i - 1] !== '\\')) {
-      inString = !inString;
-      continue;
-    }
-    if (inString) continue;
-    if (s[i] === '{') open['{']++;
-    else if (s[i] === '}') open['{']--;
-    else if (s[i] === '[') open['[']++;
-    else if (s[i] === ']') open['[']--;
-  }
-
-  // Close in reverse order of what was opened (track actual open order)
   const stack: string[] = [];
   inString = false;
   for (let i = 0; i < s.length; i++) {
@@ -535,7 +431,6 @@ function repairTruncatedJson(json: string): string {
     else if (s[i] === '}' || s[i] === ']') stack.pop();
   }
 
-  // Close remaining open brackets in reverse order
   while (stack.length > 0) {
     const opener = stack.pop();
     s += opener === '{' ? '}' : ']';

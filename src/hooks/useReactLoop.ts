@@ -185,7 +185,7 @@ export function useReactLoop(config?: Partial<ReactModelConfig>) {
           // Tools that are intermediate steps — don't mark skill as completed
           const NO_AUTO_COMPLETE = new Set<ToolName>(['expand_node', 'apply_proposal']);
           // Tools that manage their own message display — don't overwrite with observation
-          const SELF_DISPLAY = new Set<ToolName>(['expand_node']);
+          const SELF_DISPLAY = new Set<ToolName>(['expand_node', 'generate_outline', 'edit_outline']);
 
           let observation: string;
           try {

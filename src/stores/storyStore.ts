@@ -24,6 +24,7 @@ interface StoryState {
   updateTitle: (title: string) => void;
   setStyle: (style: StyleConfig) => void;
   setWorldView: (worldView: string) => void;
+  setPlayerObjective: (objective: import('@/types/story').PlayerObjective | null) => void;
   updateSettings: (updates: Partial<Story['settings']>) => void;
 
   // Node operations
@@ -90,13 +91,8 @@ export const useStoryStore = create<StoryState>()(persist((set, get) => ({
         endingCount: 3,
       },
       worldView: '',
-      style: {
-        styleId: 'cinematic_realistic',
-        styleName: '写实电影风',
-        stylePromptPrefix: 'cinematic realistic photography, dramatic lighting, ',
-        colorTone: 'warm neutral',
-        lightingStyle: 'dramatic natural',
-      },
+      style: null,
+      playerObjective: null,
     };
     set({ story, past: [], future: [] });
   },
@@ -134,6 +130,12 @@ export const useStoryStore = create<StoryState>()(persist((set, get) => ({
     const { story } = get();
     if (!story) return;
     set({ story: { ...story, worldView, updatedAt: new Date().toISOString() } });
+  },
+
+  setPlayerObjective: (objective) => {
+    const { story } = get();
+    if (!story) return;
+    set({ story: { ...story, playerObjective: objective, updatedAt: new Date().toISOString() } });
   },
 
   updateSettings: (updates) => {

@@ -48,11 +48,11 @@ export class ReactHistory {
         .slice(0, fullStart)
         .map((t, i) => {
           const toolInfo = t.action ? t.action.tool : 'reply';
-          const success = t.observation?.includes('成功') || t.observation?.includes('完成');
+          const isError = t.observation?.startsWith('错误');
           const obsShort = t.observation
             ? t.observation.slice(0, 120) + (t.observation.length > 120 ? '...' : '')
             : '';
-          return `${i + 1}. [${success ? '✅' : '⚡'}] ${toolInfo}${obsShort ? ': ' + obsShort : ''}`;
+          return `${i + 1}. [${isError ? '❌' : '✅'}] ${toolInfo}${obsShort ? ': ' + obsShort : ''}`;
         })
         .join('\n');
       messages.push({
@@ -93,14 +93,40 @@ export class ReactHistory {
     }
 
     // Inject completed-steps reminder to prevent LLM from repeating
-    if (this.turns.length > 3) {
-      const completedTools = this.turns
-        .filter((t) => t.action && (t.observation?.includes('成功') || t.observation?.includes('完成')))
+    if (this.turns.length >= 2) {
+      // Only count tools AFTER the last reset_story (if any)
+      const lastResetIdx = this.turns.findLastIndex((t) => t.action?.tool === 'reset_story' && t.observation && !t.observation.startsWith('错误'));
+      const relevantTurns = lastResetIdx >= 0 ? this.turns.slice(lastResetIdx + 1) : this.turns;
+      const completedTools = relevantTurns
+        .filter((t) => t.action && t.action.tool !== 'ask_user' && t.observation && !t.observation.startsWith('错误'))
         .map((t) => t.action!.tool);
       if (completedTools.length > 0) {
+        // Find the latest user response (from ask_user or _pauseForUser)
+        const lastUserMsg = this.userMessages.length > 1
+          ? this.userMessages[this.userMessages.length - 1]
+          : null;
+        const uniqueCompleted = [...new Set(completedTools)];
+
+        // Build explicit next-step hint based on completed tools and user response
+        let nextStepHint = '';
+        if (lastUserMsg) {
+          const lower = lastUserMsg.trim().toLowerCase();
+          if (uniqueCompleted.includes('generate_outline') && !uniqueCompleted.includes('generate_branches')) {
+            if (lower.includes('快速') || lower === '2' || lower.includes('自动')) {
+              nextStepHint = '\n⚠️ 用户已选择【快速模式】。你必须立即调用 generate_branches，禁止重新调用 select_style 或 generate_outline。';
+            } else if (lower.includes('共创') || lower === '1' || lower.includes('互动')) {
+              nextStepHint = '\n⚠️ 用户已选择【共创模式】。你必须立即调用 expand_node，禁止重新调用 select_style 或 generate_outline。';
+            }
+          }
+        }
+
+        let reminder = `[系统提醒] 已完成的步骤: ${uniqueCompleted.join(', ')}。禁止重复调用这些工具。${nextStepHint}`;
+        if (lastUserMsg) {
+          reminder += `\n用户最新回复: "${lastUserMsg}"`;
+        }
         messages.push({
           role: 'user',
-          content: `[系统提醒] 已完成的步骤: ${[...new Set(completedTools)].join(', ')}。请不要重复这些步骤。`,
+          content: reminder,
         });
       }
     }

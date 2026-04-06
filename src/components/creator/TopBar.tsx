@@ -1,11 +1,18 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import { useStoryStore } from '@/stores/storyStore';
 import { useEditorStore } from '@/stores/editorStore';
 
 export default function TopBar() {
+  const searchParams = useSearchParams();
+  const backHref = useMemo(() => {
+    const from = searchParams.get('from');
+    return from === 'drafts' ? '/profile/drafts' : '/discover';
+  }, [searchParams]);
+
   const story = useStoryStore((s) => s.story);
   const updateTitle = useStoryStore((s) => s.updateTitle);
   const toggleAgentPanel = useEditorStore((s) => s.toggleAgentPanel);
@@ -58,10 +65,10 @@ export default function TopBar() {
       {/* Left: Home + Agent toggle + title */}
       <div className="flex items-center gap-3">
         <Link
-          href="/discover"
+          href={backHref}
           className="p-2 rounded-lg transition-colors"
           style={{ color: 'var(--text-secondary)' }}
-          title="返回首页"
+          title={backHref === '/profile/drafts' ? '返回草稿箱' : '返回首页'}
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M15 18l-6-6 6-6" />

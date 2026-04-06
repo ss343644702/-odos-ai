@@ -16,8 +16,9 @@ import { v4 as uuid } from 'uuid';
 
 /** Skills that benefit from streaming (long-running LLM calls) */
 const STREAMABLE_SKILLS = new Set([
-  'outlineGenerator', 'branchGenerator', 'entityExtractor',
-  'storyboardGenerator', 'voiceGenerator', 'expandNode',
+  'outlineGenerator', 'branchGenerator', 'branchComplete', 'entityExtractor',
+  'storyboardGenerator', 'voiceGenerator', 'expandNode', 'editOutline',
+  'branchMainline', 'branchSubline',
 ]);
 
 async function callSkillAPI(
@@ -132,6 +133,9 @@ const generateOutline: ToolExecutor = async (input, ctx) => {
 
   useChatStore.getState().setOutline(outline);
   if (outline.worldView) useStoryStore.getState().setWorldView(outline.worldView);
+  if (outline.playerObjective) useStoryStore.getState().setPlayerObjective(outline.playerObjective);
+
+  ctx.updateMessage(`✅ 大纲生成完成（${outline.characters?.length || 0}个角色，${outline.depth || '?'}层深度）`);
 
   // Build a rich summary so the LLM (and user via ask_user) can see the actual story
   const charSummary = (outline.characters || [])
@@ -140,11 +144,25 @@ const generateOutline: ToolExecutor = async (input, ctx) => {
   // Support both new plotPoints and old mainPlotPoints
   const plotPoints = outline.plotPoints || outline.mainPlotPoints || [];
   const plotSummary = plotPoints
-    .map((p: any, i: number) => `${i + 1}. ${p.title}：${p.description}${p.conflict ? `\n   冲突：${p.conflict}` : ''}${p.suspense ? `\n   悬念：${p.suspense}` : ''}`)
+    .map((p: any, i: number) => {
+      let line = `${i + 1}. ${p.title}：${p.description}`;
+      if (p.isDecisionPoint) line += ` ★决策点`;
+      if (p.dilemma) line += `\n   两难：${p.dilemma}`;
+      if (p.strategyOptions?.length) line += `\n   策略：${p.strategyOptions.join(' / ')}`;
+      if (p.conflict) line += `\n   冲突：${p.conflict}`;
+      if (p.suspense) line += `\n   悬念：${p.suspense}`;
+      return line;
+    })
     .join('\n');
   const endingSummary = (outline.endings || [])
     .map((e: any) => `[${e.type}] ${e.title}：${e.description}${e.requirement ? `（条件：${e.requirement}）` : ''}`)
     .join('\n');
+
+  const objectiveSummary = outline.playerObjective
+    ? `🎯 玩家目标：${outline.playerObjective.primary}\n   隐藏真相：${outline.playerObjective.hidden}\n   衡量维度：${outline.playerObjective.measurement}`
+    : '';
+
+  const decisionCount = plotPoints.filter((p: any) => p.isDecisionPoint).length;
 
   const richResult = [
     `大纲生成完成`,
@@ -152,8 +170,9 @@ const generateOutline: ToolExecutor = async (input, ctx) => {
     outline.worldView ? `🌍 世界观：${outline.worldView}` : '',
     `🎭 基调：${outline.tone || '未指定'}`,
     `📊 层级深度：${outline.depth} 层`,
+    objectiveSummary ? `\n${objectiveSummary}` : '',
     `\n👥 角色（${outline.characters?.length || 0}）：\n  ${charSummary}`,
-    plotSummary ? `\n📋 情节脉络：\n${plotSummary}` : '',
+    plotSummary ? `\n📋 情节脉络（${decisionCount}个决策点）：\n${plotSummary}` : '',
     endingSummary ? `\n🏁 结局方向（${outline.endings?.length || 0}）：\n${endingSummary}` : '',
   ].filter(Boolean).join('\n');
 
@@ -205,38 +224,57 @@ function repairBranchStructure(
 ): { nodes: StoryNode[]; edges: StoryEdge[]; repairs: string[] } {
   const repairs: string[] = [];
   const nodeIds = new Set(nodes.map((n) => n.id));
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
 
-  // 1. Fix choices with invalid targetNodeId
+  // 1. Fix choices with invalid targetNodeId — try harder before giving up
   for (const node of nodes) {
     for (const choice of node.data.choices) {
       if (choice.targetNodeId && !nodeIds.has(choice.targetNodeId)) {
-        // Try to find a node with a similar ID (e.g., "node_2" vs "node2")
-        const stripped = choice.targetNodeId.replace(/[_-]/g, '');
-        const match = nodes.find((n) => n.id.replace(/[_-]/g, '') === stripped);
+        // Strategy A: fuzzy match (strip separators)
+        const stripped = choice.targetNodeId.replace(/[_-]/g, '').toLowerCase();
+        let match = nodes.find((n) => n.id.replace(/[_-]/g, '').toLowerCase() === stripped);
+
+        // Strategy B: match by choice text → find a node whose title contains similar text
+        if (!match && choice.text) {
+          const choiceKeywords = choice.text.replace(/[^\u4e00-\u9fa5a-zA-Z]/g, '').slice(0, 10);
+          if (choiceKeywords.length >= 2) {
+            match = nodes.find((n) =>
+              n.id !== node.id &&
+              n.data.depth > (node.data.depth || 0) &&
+              (n.data.title.includes(choiceKeywords.slice(0, 4)) || n.data.metadata?.storyContext?.includes(choiceKeywords.slice(0, 4)))
+            );
+          }
+        }
+
+        // Strategy C: find an orphaned node at depth+1 that has no incoming edge yet
+        if (!match) {
+          const connectedTargets = new Set([
+            ...edges.map(e => e.target),
+            ...nodes.flatMap(n => n.data.choices.filter(c => c.targetNodeId && nodeIds.has(c.targetNodeId)).map(c => c.targetNodeId)),
+          ]);
+          const expectedDepth = (node.data.depth || 0) + 1;
+          match = nodes.find((n) =>
+            n.id !== node.id &&
+            !connectedTargets.has(n.id) &&
+            n.type !== 'start' &&
+            Math.abs((n.data.depth || 0) - expectedDepth) <= 1
+          );
+        }
+
         if (match) {
           repairs.push(`修复: 选项"${choice.text}"目标 ${choice.targetNodeId} → ${match.id}`);
           choice.targetNodeId = match.id;
         } else {
-          repairs.push(`警告: 选项"${choice.text}"指向不存在的节点 ${choice.targetNodeId}，已移除`);
+          repairs.push(`警告: 选项"${choice.text}"指向不存在的节点 ${choice.targetNodeId}，已清除`);
           choice.targetNodeId = '';
         }
       }
     }
-    // Remove choices with empty targetNodeId
+    // Remove choices with empty targetNodeId (only those we truly can't fix)
     node.data.choices = node.data.choices.filter((c) => c.targetNodeId);
   }
 
-  // 2. Force leaf nodes (no outgoing choices) to be endings
-  const nodesWithChoices = new Set(nodes.filter((n) => n.data.choices.length > 0).map((n) => n.id));
-  for (const node of nodes) {
-    if (node.data.choices.length === 0 && node.type !== 'ending' && node.type !== 'story_config') {
-      repairs.push(`修复: 叶子节点"${node.data.title}"(${node.id}) 标记为结局`);
-      (node as any).type = 'ending';
-      node.data.allowCustomInput = false;
-    }
-  }
-
-  // 3. Ensure edges are generated for every choice (choices are the source of truth)
+  // 2. Ensure edges exist for every choice (choices are source of truth)
   const existingEdgeKeys = new Set(edges.map((e) => `${e.source}->${e.target}`));
   for (const node of nodes) {
     for (const choice of node.data.choices) {
@@ -256,8 +294,8 @@ function repairBranchStructure(
     }
   }
 
-  // 4. Remove edges pointing to non-existent nodes
-  const validEdges = edges.filter((e) => {
+  // 3. Remove edges pointing to non-existent nodes
+  let validEdges = edges.filter((e) => {
     if (!nodeIds.has(e.source) || !nodeIds.has(e.target)) {
       repairs.push(`修复: 移除无效边 ${e.source} → ${e.target}`);
       return false;
@@ -265,7 +303,81 @@ function repairBranchStructure(
     return true;
   });
 
-  // 5. Ensure at least 2 endings exist
+  // 4. Fix orphaned nodes — connect them to likely parents
+  const rootId = nodes.find(n => n.type === 'start')?.id || nodes[0]?.id;
+  const connectedTargets = new Set(validEdges.map(e => e.target));
+  const orphans = nodes.filter(n => n.id !== rootId && n.type !== 'story_config' && !connectedTargets.has(n.id));
+
+  for (const orphan of orphans) {
+    const orphanDepth = orphan.data.depth || 0;
+    // Find a parent candidate: node at depth-1 whose choice count can accommodate
+    const parentCandidates = nodes.filter(n =>
+      n.id !== orphan.id &&
+      n.type !== 'ending' &&
+      Math.abs((n.data.depth || 0) - (orphanDepth - 1)) <= 1
+    );
+    // Prefer a parent that already references this orphan in edge labels or has fewer children
+    const childCountMap = new Map<string, number>();
+    for (const e of validEdges) childCountMap.set(e.source, (childCountMap.get(e.source) || 0) + 1);
+
+    const parent = parentCandidates.sort((a, b) => (childCountMap.get(a.id) || 0) - (childCountMap.get(b.id) || 0))[0];
+
+    if (parent) {
+      // Add choice + edge
+      const choiceId = `c_repair_${uuid().slice(0, 6)}`;
+      parent.data.choices.push({
+        id: choiceId,
+        text: orphan.data.title || '继续',
+        targetNodeId: orphan.id,
+      });
+      validEdges.push({
+        id: uuid(),
+        source: parent.id,
+        target: orphan.id,
+        sourceHandle: choiceId,
+        label: orphan.data.title || '继续',
+        type: 'authored',
+      });
+      repairs.push(`修复: 孤儿节点"${orphan.data.title}"(${orphan.id}) 连接到"${parent.data.title}"(${parent.id})`);
+    }
+  }
+
+  // 5. Recalculate depth via BFS from root
+  if (rootId) {
+    const childrenMap = new Map<string, string[]>();
+    for (const e of validEdges) {
+      const list = childrenMap.get(e.source) || [];
+      list.push(e.target);
+      childrenMap.set(e.source, list);
+    }
+    const visited = new Set<string>();
+    const queue: { id: string; depth: number }[] = [{ id: rootId, depth: 0 }];
+    visited.add(rootId);
+    while (queue.length > 0) {
+      const { id, depth } = queue.shift()!;
+      const node = nodeMap.get(id);
+      if (node && node.data.depth !== depth) {
+        node.data.depth = depth;
+      }
+      for (const childId of (childrenMap.get(id) || [])) {
+        if (!visited.has(childId)) {
+          visited.add(childId);
+          queue.push({ id: childId, depth: depth + 1 });
+        }
+      }
+    }
+  }
+
+  // 6. Force leaf nodes (no outgoing choices) to be endings
+  for (const node of nodes) {
+    if (node.data.choices.length === 0 && node.type !== 'ending' && node.type !== 'story_config') {
+      repairs.push(`修复: 叶子节点"${node.data.title}"(${node.id}) 标记为结局`);
+      (node as any).type = 'ending';
+      node.data.allowCustomInput = false;
+    }
+  }
+
+  // 7. Ensure at least 2 endings exist
   const endingCount = nodes.filter((n) => n.type === 'ending').length;
   if (endingCount === 0) {
     repairs.push('警告: 没有结局节点！');
@@ -276,21 +388,9 @@ function repairBranchStructure(
   return { nodes, edges: validEdges, repairs };
 }
 
-const generateBranches: ToolExecutor = async (_input, ctx) => {
-  const { orchestrator } = useChatStore.getState();
-  if (!orchestrator.outline) return { tool: 'generate_branches', success: false, result: '请先生成大纲（generate_outline）' };
-  if (!orchestrator.style) return { tool: 'generate_branches', success: false, result: '请先选择风格（select_style）' };
-
-  ctx.updateMessage('🌳 正在生成分支剧情树...');
-  const result = await callSkillAPI('branchGenerator', {
-    outline: orchestrator.outline,
-    style: orchestrator.style,
-  }, ctx.signal);
-
-  const review = result.selfReview;
-
-  // Normalize nodes — same post-processing as pipeline mode (AgentChat.tsx:202-228)
-  const nodes: StoryNode[] = (result.nodes || []).map((n: any, i: number) => ({
+/** Normalize a raw LLM node into a StoryNode */
+function normalizeNode(n: any, i: number): StoryNode {
+  return {
     id: n.id || uuid(),
     type: inferNodeType(n, i),
     position: n.position || { x: 0, y: 0 },
@@ -316,54 +416,224 @@ const generateBranches: ToolExecutor = async (_input, ctx) => {
         storyContext: n.data?.metadata?.storyContext || '',
       },
     },
-  }));
+  };
+}
 
-  // Fix edge sourceHandle to match choice IDs — same as pipeline mode (AgentChat.tsx:230-265)
-  const nodeChoiceMap = new Map<string, Map<string, string>>();
-  for (const node of nodes) {
-    const targetToChoice = new Map<string, string>();
-    for (const c of node.data.choices) {
-      if (c.targetNodeId) targetToChoice.set(c.targetNodeId, c.id);
-    }
-    nodeChoiceMap.set(node.id, targetToChoice);
+const generateBranches: ToolExecutor = async (_input, ctx) => {
+  const { orchestrator } = useChatStore.getState();
+  if (!orchestrator.outline) return { tool: 'generate_branches', success: false, result: '请先生成大纲（generate_outline）' };
+  if (!orchestrator.style) return { tool: 'generate_branches', success: false, result: '请先选择风格（select_style）' };
+
+  const outline = orchestrator.outline;
+  const outlineDepth = Math.min(Math.max(outline.depth || 7, 7), 10);
+  const repairs: string[] = [];
+
+  // ============================================================
+  // Phase 1: Generate mainline (linear story, depth 0 → max)
+  // ============================================================
+  ctx.updateMessage('🌳 正在生成主线故事...');
+  const mainResult = await callSkillAPI('branchMainline', {
+    outline,
+  }, ctx.signal);
+
+  const rawMainNodes: any[] = mainResult.nodes || [];
+  if (rawMainNodes.length === 0) {
+    return { tool: 'generate_branches', success: false, result: '主线生成失败：没有返回节点' };
   }
 
-  const edges: StoryEdge[] = (result.edges || []).map((e: any) => {
-    let sourceHandle = e.sourceHandle || '';
-    if (!sourceHandle || sourceHandle.startsWith('choice-')) {
-      const targetMap = nodeChoiceMap.get(e.source);
-      if (targetMap) {
-        sourceHandle = targetMap.get(e.target) || sourceHandle;
-      }
-    }
-    if (!sourceHandle) {
-      const srcNode = nodes.find((n) => n.id === e.source);
-      if (srcNode?.data.choices.length) {
-        sourceHandle = srcNode.data.choices[0].id;
-      }
-    }
-    return {
-      id: e.id || uuid(),
-      source: e.source,
-      target: e.target,
-      sourceHandle,
-      label: e.label || '',
-      type: (e.type as 'authored' | 'ai_generated') || 'authored',
-    };
-  });
+  // Build mainline nodes with choices linking each to next (linear chain)
+  const mainNodes: StoryNode[] = rawMainNodes.map((n, i) => normalizeNode(n, i));
 
-  // Structural repair: fix invalid refs, leaf nodes, missing edges
-  const repaired = repairBranchStructure(nodes, edges);
+  // Create linear chain: each node's choice points to next
+  const allEdges: StoryEdge[] = [];
+  for (let i = 0; i < mainNodes.length - 1; i++) {
+    const choiceId = uuid();
+    mainNodes[i].data.choices = [{
+      id: choiceId,
+      text: rawMainNodes[i]?.choiceText || rawMainNodes[i]?.data?.choiceText || '继续',
+      targetNodeId: mainNodes[i + 1].id,
+    }];
+    allEdges.push({
+      id: uuid(),
+      source: mainNodes[i].id,
+      target: mainNodes[i + 1].id,
+      sourceHandle: choiceId,
+      label: '',
+      type: 'authored',
+    });
+  }
+  // Last node is ending — no choices
+  const lastMain = mainNodes[mainNodes.length - 1];
+  lastMain.data.choices = [];
+  (lastMain as any).type = 'ending';
+  lastMain.data.allowCustomInput = false;
+
+  // Ensure depths are correct
+  mainNodes.forEach((n, i) => { n.data.depth = i; });
+
+  // Collect branch points: only decision points get sublines (not every scene)
+  const branchPoints = rawMainNodes
+    .map((raw, i) => ({ raw, node: mainNodes[i], index: i }))
+    .filter(({ raw, node, index }) =>
+      index > 0 && index < mainNodes.length - 1 && node.type !== 'ending' && raw.isDecisionPoint === true
+    );
+
+  // Fallback: if no decision points marked, pick 2-3 scene nodes as branch points
+  if (branchPoints.length === 0) {
+    const sceneNodes = rawMainNodes
+      .map((raw, i) => ({ raw, node: mainNodes[i], index: i }))
+      .filter(({ node, index }) => index > 0 && index < mainNodes.length - 1 && node.type !== 'ending');
+    // Pick evenly spaced nodes (up to 3)
+    const step = Math.max(1, Math.floor(sceneNodes.length / 3));
+    for (let i = 0; i < sceneNodes.length && branchPoints.length < 3; i += step) {
+      branchPoints.push(sceneNodes[i]);
+    }
+  }
+
+  ctx.updateMessage(`🌳 主线完成（${mainNodes.length}个节点），正在为 ${branchPoints.length} 个决策点生成支线...`);
+
+  // ============================================================
+  // Phase 2: Generate sublines in parallel
+  // ============================================================
+  const allNodes: StoryNode[] = [...mainNodes];
+
+  // Distribute outline endings to sublines (skip the first one used by mainline)
+  const outlineEndings = outline.endings || [];
+  const sublineEndingHints = outlineEndings.filter((e: any) => e.type !== 'good').slice(0, branchPoints.length);
+
+  const sublineResults = await Promise.all(
+    branchPoints.map(async ({ raw, node: bpNode, index: bpIdx }, subIdx) => {
+      try {
+        const result = await callSkillAPI('branchSubline', {
+          outline,
+          mainlineNodes: rawMainNodes,
+          branchPointNode: {
+            ...raw,
+            id: bpNode.id,
+            data: bpNode.data,
+            // Pass decision point strategy info for strategy-based branching
+            dilemma: raw.dilemma || '',
+            strategyOptions: raw.strategyOptions || [],
+          },
+          branchIndex: subIdx,
+          endingHint: sublineEndingHints[subIdx]
+            ? `${sublineEndingHints[subIdx].title}（${sublineEndingHints[subIdx].type}）: ${sublineEndingHints[subIdx].description}`
+            : undefined,
+        }, ctx.signal);
+        return { result, bpNode, bpIdx, subIdx };
+      } catch (err: any) {
+        repairs.push(`⚠️ 支线 ${subIdx + 1} 生成失败: ${err.message}`);
+        return null;
+      }
+    }),
+  );
+
+  // ============================================================
+  // Phase 3: Merge sublines into tree
+  // ============================================================
+  for (const sub of sublineResults) {
+    if (!sub || !sub.result?.nodes?.length) continue;
+    const { result: subResult, bpNode, subIdx } = sub;
+
+    const subNodes: StoryNode[] = (subResult.nodes || []).map((n: any, i: number) => {
+      const node = normalizeNode(n, allNodes.length + i);
+      // Ensure ID doesn't collide
+      if (allNodes.some(existing => existing.id === node.id)) {
+        node.id = `sub_${subIdx + 1}_${uuid().slice(0, 6)}`;
+      }
+      node.data.depth = (bpNode.data.depth || 0) + 1 + i;
+      return node;
+    });
+
+    if (subNodes.length === 0) continue;
+
+    // Create linear chain within subline
+    const rawSubNodes = subResult.nodes || [];
+    for (let i = 0; i < subNodes.length - 1; i++) {
+      const choiceId = uuid();
+      subNodes[i].data.choices = [{
+        id: choiceId,
+        text: rawSubNodes[i]?.choiceText || rawSubNodes[i]?.data?.choiceText || '继续',
+        targetNodeId: subNodes[i + 1].id,
+      }];
+      allEdges.push({
+        id: uuid(),
+        source: subNodes[i].id,
+        target: subNodes[i + 1].id,
+        sourceHandle: choiceId,
+        label: '',
+        type: 'authored',
+      });
+    }
+
+    // Handle last subline node: converge to main or independent ending
+    const lastSubNode = subNodes[subNodes.length - 1];
+    const convergeTarget = (subResult.nodes[subResult.nodes.length - 1] as any)?.convergeToMainNodeId;
+
+    if (convergeTarget && mainNodes.some(mn => mn.id === convergeTarget)) {
+      // Converge back to mainline
+      (lastSubNode as any).type = 'scene';
+      lastSubNode.data.allowCustomInput = true;
+      const convergeChoiceId = uuid();
+      lastSubNode.data.choices = [{
+        id: convergeChoiceId,
+        text: '命运交汇',
+        targetNodeId: convergeTarget,
+      }];
+      allEdges.push({
+        id: uuid(),
+        source: lastSubNode.id,
+        target: convergeTarget,
+        sourceHandle: convergeChoiceId,
+        label: '命运交汇',
+        type: 'authored',
+      });
+      repairs.push(`✨ 支线 ${subIdx + 1} 汇回主线节点 ${convergeTarget}`);
+    } else {
+      // Independent ending
+      (lastSubNode as any).type = 'ending';
+      lastSubNode.data.allowCustomInput = false;
+      lastSubNode.data.choices = [];
+    }
+
+    // Connect branch point to first subline node
+    const branchChoiceId = uuid();
+    const choiceText = subResult.choiceTextAtBranchPoint || `支线：${subNodes[0].data.title}`;
+    bpNode.data.choices.push({
+      id: branchChoiceId,
+      text: choiceText,
+      targetNodeId: subNodes[0].id,
+    });
+    allEdges.push({
+      id: uuid(),
+      source: bpNode.id,
+      target: subNodes[0].id,
+      sourceHandle: branchChoiceId,
+      label: choiceText,
+      type: 'authored',
+    });
+
+    allNodes.push(...subNodes);
+  }
+
+  // ============================================================
+  // Phase 4: Repair + Layout
+  // ============================================================
+  const repaired = repairBranchStructure(allNodes, allEdges);
   const repairedEdges = repaired.edges;
-  const structureRepairs = repaired.repairs;
+  repairs.push(...repaired.repairs);
 
-  // Check for ending issues
-  const endingIssues = checkEndingIssues(nodes, repairedEdges);
+  // Check stats
+  const branchingNodes = allNodes.filter(n => n.data.choices.length >= 2).length;
+  const maxDepthActual = Math.max(...allNodes.map(n => n.data.depth || 0));
+  const endings = allNodes.filter(n => n.type === 'ending');
+  const shallowEndings = endings.filter(n => (n.data.depth || 0) <= Math.floor(outlineDepth / 2));
+  const endingIssues = checkEndingIssues(allNodes, repairedEdges);
+  repairs.push(...endingIssues);
 
-  // Layout + config node — same as pipeline mode
-  if (nodes.length > 0) {
-    const layoutedNodes = layoutNodes(nodes, repairedEdges);
-
+  // Layout + config node
+  if (allNodes.length > 0) {
+    const layoutedNodes = layoutNodes(allNodes, repairedEdges);
     const rootNode = layoutedNodes.find((n) => n.type === 'start') || layoutedNodes[0];
     const configNode: StoryNode = {
       id: 'story-config',
@@ -378,21 +648,16 @@ const generateBranches: ToolExecutor = async (_input, ctx) => {
         metadata: { tags: [], storyContext: '' },
       },
     };
-
     useStoryStore.getState().setNodesAndEdges([configNode, ...layoutedNodes], repairedEdges);
   }
 
-  const summary = `分支剧情生成完成：${nodes.length}个节点，${repairedEdges.length}条边${review ? `，自检评分 ${review.rating}/10` : ''}`;
-  const allIssues = [...structureRepairs, ...endingIssues];
-  const resultText = allIssues.length > 0
-    ? `${summary}\n\n结构修复：\n${allIssues.join('\n')}`
+  const summary = `分支剧情生成完成：${allNodes.length}个节点，${repairedEdges.length}条边，${endings.length}个结局（${shallowEndings.length}个短线），${branchingNodes}个分叉点，最大深度${maxDepthActual}层，${branchPoints.length}条支线`;
+  const resultText = repairs.length > 0
+    ? `${summary}\n\n修复/信息：\n${repairs.join('\n')}`
     : summary;
 
-  return {
-    tool: 'generate_branches', success: true,
-    result: resultText,
-    data: result,
-  };
+  ctx.updateMessage(`✅ ${summary}`);
+  return { tool: 'generate_branches', success: true, result: resultText };
 };
 
 // ============================================================
@@ -496,17 +761,22 @@ function applyProposalToStory(proposal: NodeProposal, expansion: PendingExpansio
     targetNodeId: '',
   }));
 
-  // Position
+  // Position: center children under parent based on total expected children
   const parentNode = story.nodes.find(n => n.id === expansion.parentNodeId);
   const parentPos = parentNode?.position || { x: 0, y: 0 };
-  const siblingCount = story.nodes.filter(n =>
+  const existingSiblings = story.nodes.filter(n =>
     story.edges.some(e => e.source === expansion.parentNodeId && e.target === n.id)
-  ).length;
+  );
+  const totalChoices = parentNode?.data?.choices?.length || 1;
+  const siblingIndex = existingSiblings.length; // this node will be the Nth child
+  const totalExpected = Math.max(totalChoices, siblingIndex + 1);
+  const CHILD_SPACING = 300;
+  const offsetX = (siblingIndex - (totalExpected - 1) / 2) * CHILD_SPACING;
 
   const newNode: StoryNode = {
     id: nodeId,
     type: nodeType,
-    position: { x: parentPos.x + (siblingCount * 300 - 150), y: parentPos.y + 200 },
+    position: { x: parentPos.x + offsetX, y: parentPos.y + 220 },
     data: {
       title: proposal.fullNode.title || proposal.title,
       narration: proposal.fullNode.narration || '',
@@ -719,8 +989,10 @@ const applyProposalTool: ToolExecutor = async (input, ctx) => {
 };
 
 /**
- * auto_complete_branches: Automatically complete all remaining pending expansions.
- * AI picks the best proposal for each (prefers endings when deep enough).
+ * auto_complete_branches: Hybrid strategy.
+ * - ≤2 pending → sequential expandNode (preserves quality)
+ * - >2 pending → single branchComplete LLM call (fast batch)
+ * Always runs layoutNodes() at the end for proper positioning.
  */
 const autoCompleteBranches: ToolExecutor = async (_input, ctx) => {
   const ib = useChatStore.getState().orchestrator.interactiveBranch;
@@ -729,36 +1001,199 @@ const autoCompleteBranches: ToolExecutor = async (_input, ctx) => {
   const { setInteractiveBranch, removePendingExpansion } = useChatStore.getState();
   setInteractiveBranch({ phase: 'auto_completing' });
 
+  const pending = [...ib.pendingExpansions];
   let completed = 0;
-  let maxIterations = 50; // safety limit
 
-  while (maxIterations-- > 0) {
-    if (ctx.signal.aborted) throw new Error('已取消');
+  try {
+  // ── Main loop: keep going until all pending expansions are drained ──
+  let batchRound = 0;
+  const MAX_BATCH_ROUNDS = 5;
+  const MAX_SEQUENTIAL = 50;
+  let sequentialCount = 0;
+
+  while (!ctx.signal.aborted) {
     const currentIb = useChatStore.getState().orchestrator.interactiveBranch;
-    if (currentIb.pendingExpansions.length === 0) break;
+    const currentPending = [...currentIb.pendingExpansions];
+    if (currentPending.length === 0) break;
 
-    const next = currentIb.pendingExpansions[0];
-    ctx.updateMessage(`⚡ 自动生成中... (${completed} 完成, ${currentIb.pendingExpansions.length} 剩余)`);
+    if (currentPending.length > 2 && batchRound < MAX_BATCH_ROUNDS) {
+      // ── Batch mode ──
+      batchRound++;
+      ctx.updateMessage(`⚡ 批量生成第${batchRound}轮 (${currentPending.length} 个分支)...`);
 
-    try {
-      const proposals = await callExpandNodeAPI(next, ctx.signal);
-      if (proposals.length === 0) {
-        removePendingExpansion(next.parentNodeId, next.choiceId);
-        continue;
+      const story = useStoryStore.getState().story;
+      const outline = useChatStore.getState().orchestrator.outline;
+      if (!story || !outline) break;
+
+      const existingNodes = story.nodes
+        .filter(n => n.type !== 'story_config')
+        .map(n => ({
+          id: n.id, type: n.type, title: n.data.title,
+          narration: n.data.narration?.slice(0, 100),
+          depth: n.data.depth,
+          choices: n.data.choices.map(c => ({ id: c.id, text: c.text, targetNodeId: c.targetNodeId })),
+        }));
+
+      const existingEdges = story.edges.map(e => ({
+        id: e.id, source: e.source, target: e.target, sourceHandle: e.sourceHandle,
+      }));
+
+      const pendingDesc = currentPending.map(p => {
+        const parent = story.nodes.find(n => n.id === p.parentNodeId);
+        return {
+          parentNodeId: p.parentNodeId,
+          parentTitle: parent?.data.title || p.parentNodeId,
+          choiceId: p.choiceId,
+          choiceText: p.choiceText,
+          depth: p.depth,
+          shouldBeEnding: currentIb.maxDepth > 0 && p.depth >= currentIb.maxDepth * 0.7,
+        };
+      });
+
+      try {
+        console.log(`[autoComplete] batch round ${batchRound}: ${currentPending.length} pending, calling branchComplete...`);
+        const result = await callSkillAPI('branchComplete', {
+          outline,
+          existingNodes,
+          existingEdges,
+          pendingExpansions: pendingDesc,
+        }, ctx.signal);
+        console.log(`[autoComplete] branchComplete returned: ${(result.nodes || []).length} nodes, ${(result.edges || []).length} edges`);
+
+        const newNodes: StoryNode[] = (result.nodes || []).map((n: any, i: number) => ({
+          id: n.id || `node_complete_${uuid().slice(0, 8)}`,
+          type: inferNodeType(n, -1),
+          position: { x: 0, y: 0 },
+          data: {
+            title: n.data?.title || n.title || `补全节点${i + 1}`,
+            narration: n.data?.narration || n.narration || '',
+            dialogue: n.data?.dialogue || n.dialogue || null,
+            character: n.data?.character || n.character || null,
+            imageUrl: null,
+            imagePrompt: n.data?.imagePrompt || n.imagePrompt || '',
+            audioUrl: null,
+            choices: (n.data?.choices || n.choices || []).map((c: any) => ({
+              id: c.id || `c_${uuid().slice(0, 6)}`,
+              text: c.text || '',
+              targetNodeId: c.targetNodeId || '',
+            })),
+            allowCustomInput: (n.type === 'ending') ? false : (n.data?.allowCustomInput ?? true),
+            depth: n.data?.depth ?? n.depth ?? 0,
+            voiceSegments: [],
+            frames: [],
+            metadata: {
+              tags: n.data?.metadata?.tags || [],
+              storyContext: n.data?.metadata?.storyContext || '',
+            },
+          },
+        }));
+
+        const newEdges: StoryEdge[] = (result.edges || []).map((e: any) => ({
+          id: e.id || `edge_${uuid().slice(0, 8)}`,
+          source: e.source,
+          target: e.target,
+          sourceHandle: e.sourceHandle || '',
+          label: e.label || '',
+          type: (e.type as 'authored' | 'ai_generated') || 'authored',
+        }));
+
+        // Fix edge sourceHandle to match actual choice IDs
+        const nodeChoiceMap = new Map<string, Map<string, string>>();
+        for (const node of [...existingNodes, ...newNodes.map(n => ({ id: n.id, choices: n.data.choices }))]) {
+          const targetToChoice = new Map<string, string>();
+          for (const c of (node as any).data?.choices || (node as any).choices || []) {
+            if (c.targetNodeId) targetToChoice.set(c.targetNodeId, c.id);
+          }
+          nodeChoiceMap.set(node.id, targetToChoice);
+        }
+        for (const edge of newEdges) {
+          if (!edge.sourceHandle) {
+            const targetMap = nodeChoiceMap.get(edge.source);
+            if (targetMap) edge.sourceHandle = targetMap.get(edge.target) || '';
+          }
+        }
+
+        // Update choice targetNodeIds on existing parent nodes
+        for (const edge of newEdges) {
+          const parentNode = story.nodes.find(n => n.id === edge.source);
+          if (parentNode) {
+            const choice = parentNode.data.choices.find(c => c.id === edge.sourceHandle);
+            if (choice && !choice.targetNodeId) {
+              useStoryStore.getState().updateChoice(edge.source, edge.sourceHandle, { targetNodeId: edge.target });
+            }
+          }
+        }
+
+        for (const node of newNodes) useStoryStore.getState().addNode(node);
+        for (const edge of newEdges) useStoryStore.getState().addEdge(edge);
+        completed += newNodes.length;
+
+        // Clear addressed pending expansions
+        for (const p of currentPending) {
+          removePendingExpansion(p.parentNodeId, p.choiceId);
+        }
+
+        // Register new pending expansions from newly created non-ending nodes
+        for (const node of newNodes) {
+          if (node.type !== 'ending' && node.data.choices.length > 0) {
+            for (const choice of node.data.choices) {
+              if (!choice.targetNodeId) {
+                useChatStore.getState().addPendingExpansion({
+                  parentNodeId: node.id,
+                  choiceId: choice.id,
+                  choiceText: choice.text,
+                  depth: node.data.depth + 1,
+                });
+              }
+            }
+          }
+        }
+        // Loop continues — will check remaining pending and batch/sequential again
+      } catch (err: any) {
+        console.error(`[autoComplete] batch round ${batchRound} failed:`, err);
+        // Don't break — fall through to sequential in next iteration
+        batchRound = MAX_BATCH_ROUNDS; // force sequential for remaining
       }
+    } else {
+      // ── Sequential mode ──
+      if (sequentialCount >= MAX_SEQUENTIAL) break;
+      const next = currentPending[0];
+      ctx.updateMessage(`⚡ 自动生成中... (${completed} 完成, ${currentPending.length} 剩余)`);
 
-      // Pick: prefer ending if depth >= 70% maxDepth, else pick first
-      const depthPct = currentIb.maxDepth > 0 ? next.depth / currentIb.maxDepth : 0;
-      const pick = depthPct >= 0.7
-        ? (proposals.find(p => p.isEnding) || proposals[0])
-        : proposals[0];
-
-      applyProposalToStory(pick, next);
-      completed++;
-    } catch (err: any) {
-      // Skip failed expansion
-      removePendingExpansion(next.parentNodeId, next.choiceId);
+      try {
+        const proposals = await callExpandNodeAPI(next, ctx.signal);
+        if (proposals.length === 0) {
+          removePendingExpansion(next.parentNodeId, next.choiceId);
+          sequentialCount++;
+          continue;
+        }
+        const depthPct = currentIb.maxDepth > 0 ? next.depth / currentIb.maxDepth : 0;
+        const pick = depthPct >= 0.7
+          ? (proposals.find(p => p.isEnding) || proposals[0])
+          : proposals[0];
+        applyProposalToStory(pick, next);
+        completed++;
+      } catch {
+        removePendingExpansion(next.parentNodeId, next.choiceId);
+      }
+      sequentialCount++;
     }
+  }
+  } catch (err: any) {
+    console.error('[autoComplete] error:', err);
+  }
+
+  // ── Global layout reflow (always runs) ──
+  const finalStory = useStoryStore.getState().story;
+  if (finalStory && finalStory.nodes.length > 0) {
+    const contentNodes = finalStory.nodes.filter(n => n.type !== 'story_config');
+    const configNode = finalStory.nodes.find(n => n.type === 'story_config');
+    const layouted = layoutNodes(contentNodes, finalStory.edges);
+    const rootNode = layouted.find(n => n.type === 'start') || layouted[0];
+    const allNodes = configNode
+      ? [{ ...configNode, position: { x: rootNode?.position?.x || 0, y: (rootNode?.position?.y || 0) - 120 } }, ...layouted]
+      : layouted;
+    useStoryStore.getState().setNodesAndEdges(allNodes, finalStory.edges);
   }
 
   setInteractiveBranch({ phase: 'idle', active: false });
@@ -1428,6 +1863,62 @@ const listNodes: ToolExecutor = async (input) => {
   return { tool: 'list_nodes', success: true, result };
 };
 
+// ============================================================
+// edit_outline — LLM-powered outline modification
+// ============================================================
+const editOutline: ToolExecutor = async (input, ctx) => {
+  const chatStore = useChatStore.getState();
+  const outline = chatStore.orchestrator.outline;
+  if (!outline) return { tool: 'edit_outline', success: false, result: '还没有大纲，请先 generate_outline' };
+
+  const instruction = (input.instruction as string) || (input.raw as string) || '';
+  if (!instruction) return { tool: 'edit_outline', success: false, result: '请提供修改指令' };
+
+  ctx.updateMessage('📝 正在修改大纲...');
+
+  // Call LLM to apply the modification
+  const result = await callSkillAPI('editOutline', {
+    existingOutline: outline,
+    instruction,
+  }, ctx.signal);
+
+  // result should be a full outline object — write it back
+  if (!result || !result.theme) {
+    return { tool: 'edit_outline', success: false, result: 'LLM 返回的大纲格式不正确，请重试' };
+  }
+
+  chatStore.setOutline(result);
+  if (result.worldView) useStoryStore.getState().setWorldView(result.worldView);
+  if (result.playerObjective) useStoryStore.getState().setPlayerObjective(result.playerObjective);
+
+  // Build summary for the agent
+  const charSummary = (result.characters || [])
+    .map((c: any) => `${c.name}(${c.role})${c.secret ? `[秘密: ${c.secret}]` : ''}`)
+    .join('\n  ');
+  const plotPoints = result.plotPoints || result.mainPlotPoints || [];
+  const plotSummary = plotPoints
+    .map((p: any, i: number) => `${i + 1}. ${p.title}：${p.description}`)
+    .join('\n');
+  const endingSummary = (result.endings || [])
+    .map((e: any) => `[${e.type}] ${e.title}：${e.description}`)
+    .join('\n');
+
+  ctx.updateMessage(`✅ 大纲已修改（${result.characters?.length || 0}个角色，${result.depth || '?'}层深度）`);
+
+  const richResult = [
+    `大纲修改完成（指令："${instruction}"）`,
+    `\n📖 主题：${result.theme}`,
+    result.worldView ? `🌍 世界观：${result.worldView}` : '',
+    `🎭 基调：${result.tone || '未指定'}`,
+    `📊 层级深度：${result.depth} 层`,
+    `\n👥 角色（${result.characters?.length || 0}）：\n  ${charSummary}`,
+    plotSummary ? `\n📋 情节脉络：\n${plotSummary}` : '',
+    endingSummary ? `\n🏁 结局方向（${result.endings?.length || 0}）：\n${endingSummary}` : '',
+  ].filter(Boolean).join('\n');
+
+  return { tool: 'edit_outline', success: true, result: richResult, data: result };
+};
+
 const resetStory: ToolExecutor = async (_input, ctx) => {
   const story = useStoryStore.getState().story;
   if (!story) return { tool: 'reset_story', success: false, result: '没有故事数据' };
@@ -1439,12 +1930,13 @@ const resetStory: ToolExecutor = async (_input, ctx) => {
   const chatStore = useChatStore.getState();
   chatStore.setOutline(null as any);
   chatStore.setEntities(null as any);
+  chatStore.setSelectedStyle(null as any);
   chatStore.orchestrator.skills.forEach((s) => chatStore.updateSkillStatus(s.name, 'idle'));
   chatStore.setCurrentSkill(null);
 
   return {
     tool: 'reset_story', success: true,
-    result: `已清空故事画布：删除了 ${nodeCount} 个节点和所有连线。可以重新开始创作。`,
+    result: `已清空故事画布：删除了 ${nodeCount} 个节点和所有连线，所有创作进度已重置。\n⚠️ 之前的所有步骤（select_style、generate_outline、generate_branches 等）全部作废，必须从 select_style 重新开始。禁止跳过任何步骤。`,
   };
 };
 
@@ -1469,6 +1961,7 @@ export const TOOL_EXECUTORS: Record<ToolName, ToolExecutor> = {
   manage_choice: manageChoice,
   manage_frame: manageFrame,
   list_nodes: listNodes,
+  edit_outline: editOutline,
   reset_story: resetStory,
   get_state: getState,
   ask_user: askUser,

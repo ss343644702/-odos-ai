@@ -5,8 +5,8 @@ const VALID_TOOLS: Set<string> = new Set([
   'expand_node', 'apply_proposal', 'auto_complete_branches',
   'extract_entities', 'generate_entity_images', 'generate_storyboard',
   'generate_voice', 'edit_node', 'manage_node', 'manage_edge',
-  'manage_choice', 'manage_frame', 'list_nodes', 'reset_story',
-  'get_state', 'ask_user',
+  'manage_choice', 'manage_frame', 'list_nodes', 'edit_outline',
+  'reset_story', 'get_state', 'ask_user',
 ]);
 
 /** Clean up a tool name by removing common LLM formatting artifacts */

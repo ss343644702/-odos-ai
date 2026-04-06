@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { v4 as uuid } from 'uuid';
 import type {
-  ChatMessage, SkillName, SkillState, OrchestratorState, AgentMode,
+  ChatMessage, SkillName, SkillState, OrchestratorState,
   InteractiveBranchState, PendingExpansion, NodeProposal, INITIAL_INTERACTIVE_BRANCH,
 } from '@/lib/agent/types';
 import { INITIAL_INTERACTIVE_BRANCH as INIT_IB } from '@/lib/agent/types';
@@ -13,10 +13,8 @@ interface ChatState {
   isStreaming: boolean;
   orchestrator: OrchestratorState;
 
-  // ReAct mode
-  agentMode: AgentMode;
+  // ReAct mode (pipeline removed)
   reactLoopActive: boolean;
-  setAgentMode: (mode: AgentMode) => void;
   setReactLoopActive: (active: boolean) => void;
 
   addMessage: (msg: Omit<ChatMessage, 'id' | 'timestamp'>) => void;
@@ -54,9 +52,7 @@ const initialSkills: SkillState[] = [
 export const useChatStore = create<ChatState>()(persist((set, get) => ({
   messages: [],
   isStreaming: false,
-  agentMode: 'pipeline' as AgentMode,
   reactLoopActive: false,
-  setAgentMode: (mode) => set({ agentMode: mode }),
   setReactLoopActive: (active) => set({ reactLoopActive: active }),
   orchestrator: {
     currentSkill: null,
@@ -91,7 +87,18 @@ export const useChatStore = create<ChatState>()(persist((set, get) => ({
   },
 
   setStreaming: (v) => set({ isStreaming: v }),
-  clearMessages: () => set({ messages: [], orchestrator: { ...get().orchestrator, currentSkill: null, skills: [...initialSkills], interactiveBranch: { ...INIT_IB } } }),
+  clearMessages: () => set({
+    messages: [],
+    orchestrator: {
+      currentSkill: null,
+      skills: [...initialSkills],
+      storyDescription: '',
+      style: null,
+      outline: null,
+      entities: null,
+      interactiveBranch: { ...INIT_IB },
+    },
+  }),
 
   setCurrentSkill: (skill) =>
     set((s) => ({
@@ -201,7 +208,6 @@ export const useChatStore = create<ChatState>()(persist((set, get) => ({
   partialize: (state) => ({
     messages: state.messages,
     orchestrator: state.orchestrator,
-    agentMode: state.agentMode,
   }),
   merge: (persisted: any, current) => {
     const merged = { ...current, ...persisted };

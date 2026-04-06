@@ -57,8 +57,8 @@ function storyEdgeToFlow(edge: StoryEdge, storyNodes?: StoryNode[]): Edge {
     }
   } else if (edge.sourceHandle && edge.sourceHandle !== 'default') {
     resolvedHandle = edge.sourceHandle;
-    // If label is missing but we have a valid sourceHandle, look up the choice text
-    if (!resolvedLabel && storyNodes) {
+    // Always resolve label from current choice text (keeps edge label in sync with choice edits)
+    if (storyNodes) {
       const sourceNode = storyNodes.find((n) => n.id === edge.source);
       const choice = sourceNode?.data.choices?.find((c) => c.id === edge.sourceHandle);
       if (choice) resolvedLabel = choice.text || '';
@@ -99,6 +99,9 @@ function StoryCanvasInner() {
   const storeAddEdge = useStoryStore((s) => s.addEdge);
   const storeAddNode = useStoryStore((s) => s.addNode);
   const storeUpdateChoice = useStoryStore((s) => s.updateChoice);
+  const storeAddChoice = useStoryStore((s) => s.addChoice);
+  const storeRemoveNode = useStoryStore((s) => s.removeNode);
+  const storeRemoveEdge = useStoryStore((s) => s.removeEdge);
   const undo = useStoryStore((s) => s.undo);
   const redo = useStoryStore((s) => s.redo);
   const canUndo = useStoryStore((s) => s.canUndo);
@@ -120,8 +123,41 @@ function StoryCanvasInner() {
     [story?.edges, story?.nodes]
   );
 
-  const [nodes, setNodes, onNodesChange] = useNodesState(flowNodes);
-  const [edges, setEdges, onEdgesChange] = useEdgesState(flowEdges);
+  const [nodes, setNodes, onNodesChangeBase] = useNodesState(flowNodes);
+  const [edges, setEdges, onEdgesChangeBase] = useEdgesState(flowEdges);
+
+  // Wrap change handlers to sync deletions to Zustand store
+  const onNodesChange = useCallback(
+    (changes: any[]) => {
+      onNodesChangeBase(changes);
+      for (const change of changes) {
+        if (change.type === 'remove') {
+          storeRemoveNode(change.id);
+        }
+      }
+    },
+    [onNodesChangeBase, storeRemoveNode]
+  );
+
+  const onEdgesChange = useCallback(
+    (changes: any[]) => {
+      // Before applying changes, look up edge data for removals so we can clear choices
+      for (const change of changes) {
+        if (change.type === 'remove') {
+          const edge = (story?.edges || []).find((e) => e.id === change.id);
+          if (edge) {
+            storeRemoveEdge(change.id);
+            // Clear the choice's targetNodeId on the source node
+            if (edge.sourceHandle && edge.source) {
+              storeUpdateChoice(edge.source, edge.sourceHandle, { targetNodeId: '' });
+            }
+          }
+        }
+      }
+      onEdgesChangeBase(changes);
+    },
+    [onEdgesChangeBase, storeRemoveEdge, storeUpdateChoice, story?.edges]
+  );
 
   // Sync when story changes (useEffect, not useMemo, for side effects)
   useEffect(() => {
@@ -155,35 +191,92 @@ function StoryCanvasInner() {
 
   const onConnect = useCallback(
     (params: Connection) => {
-      if (!params.source || !params.target) return;
+      if (!params.source || !params.target || !story) return;
 
-      let edgeLabel = '';
-      if (params.sourceHandle && story) {
-        const sourceNode = (story.nodes || []).find((n) => n.id === params.source);
-        const choice = sourceNode?.data.choices?.find((c) => c.id === params.sourceHandle);
-        if (choice) edgeLabel = choice.text;
+      const sourceNode = (story.nodes || []).find((n) => n.id === params.source);
+      const targetNode = (story.nodes || []).find((n) => n.id === params.target);
+      const existingEdges = story.edges || [];
+
+      // Prevent duplicate: if this sourceHandle already connects to a target, block it
+      if (params.sourceHandle) {
+        const alreadyConnected = existingEdges.some(
+          (e) => e.source === params.source && e.sourceHandle === params.sourceHandle
+        );
+        if (alreadyConnected) return;
+      } else {
+        // Default handle (no choices) — block if any edge already exists from this source
+        const alreadyConnected = existingEdges.some(
+          (e) => e.source === params.source && (!e.sourceHandle || e.sourceHandle === '')
+        );
+        if (alreadyConnected) return;
       }
 
-      setEdges((eds) => addEdge({ ...params, type: 'smoothstep', label: edgeLabel }, eds));
+      // Resolve edge label and choice
+      let edgeLabel = '';
+      let choiceId = params.sourceHandle || '';
+
+      if (choiceId && sourceNode) {
+        const choice = sourceNode.data.choices?.find((c) => c.id === choiceId);
+        if (choice) {
+          // If choice text is empty, use target node title
+          edgeLabel = choice.text || targetNode?.data.title || '';
+          // Update choice text if it was empty
+          if (!choice.text && targetNode?.data.title) {
+            storeUpdateChoice(params.source, choiceId, {
+              targetNodeId: params.target,
+              text: targetNode.data.title,
+            });
+          } else {
+            storeUpdateChoice(params.source, choiceId, {
+              targetNodeId: params.target,
+            });
+          }
+        }
+      } else if (!choiceId && sourceNode) {
+        // Default handle — auto-create a choice with target node's title
+        const newChoiceId = uuid();
+        const choiceText = targetNode?.data.title || '继续';
+        edgeLabel = choiceText;
+        choiceId = newChoiceId;
+        storeAddChoice(params.source, {
+          id: newChoiceId,
+          text: choiceText,
+          targetNodeId: params.target,
+        });
+      }
+
+      setEdges((eds) => addEdge({ ...params, sourceHandle: choiceId, type: 'smoothstep', label: edgeLabel }, eds));
 
       const edgeId = `e-${params.source}-${params.target}-${Date.now()}`;
       const storyEdge: StoryEdge = {
         id: edgeId,
         source: params.source,
         target: params.target,
-        sourceHandle: params.sourceHandle || '',
+        sourceHandle: choiceId,
         label: edgeLabel,
         type: 'authored',
       };
       storeAddEdge(storyEdge);
-
-      if (params.sourceHandle) {
-        storeUpdateChoice(params.source, params.sourceHandle, {
-          targetNodeId: params.target,
-        });
-      }
     },
-    [setEdges, storeAddEdge, storeUpdateChoice, story]
+    [setEdges, storeAddEdge, storeUpdateChoice, storeAddChoice, story]
+  );
+
+  // Prevent connecting from a handle that's already connected to another node
+  const isValidConnection = useCallback(
+    (connection: Edge | Connection) => {
+      if (!story || !connection.source) return true;
+      const existingEdges = story.edges || [];
+      if (connection.sourceHandle) {
+        return !existingEdges.some(
+          (e) => e.source === connection.source && e.sourceHandle === connection.sourceHandle
+        );
+      }
+      // Default handle — block if any edge exists from this source without a specific handle
+      return !existingEdges.some(
+        (e) => e.source === connection.source && (!e.sourceHandle || e.sourceHandle === '')
+      );
+    },
+    [story]
   );
 
   const onNodeDragStop = useCallback(
@@ -253,6 +346,7 @@ function StoryCanvasInner() {
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
+        isValidConnection={isValidConnection}
         onNodeDragStop={onNodeDragStop}
         onNodeClick={onNodeClick}
         onPaneClick={onPaneClick}
