@@ -9,8 +9,15 @@ cd /opt/odos-ai
 echo "=== 拉取最新代码 ==="
 git pull origin main
 
+echo "=== 读取 NEXT_PUBLIC 变量 ==="
+SUPABASE_URL=$(grep NEXT_PUBLIC_SUPABASE_URL .env.production | cut -d= -f2-)
+SUPABASE_KEY=$(grep NEXT_PUBLIC_SUPABASE_ANON_KEY .env.production | cut -d= -f2-)
+
 echo "=== 构建 Docker 镜像 ==="
-docker build -t odos-ai .
+docker build \
+  --build-arg NEXT_PUBLIC_SUPABASE_URL="$SUPABASE_URL" \
+  --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY="$SUPABASE_KEY" \
+  -t odos-ai .
 
 echo "=== 重启容器 ==="
 docker stop odos-ai 2>/dev/null || true
