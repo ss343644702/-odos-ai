@@ -22,12 +22,17 @@ interface NarrationPlayerProps {
 
 export interface NarrationPlayerHandle {
   stop: () => void;
+  playFromSegment: (index: number) => void;
+  toggleMute: () => void;
+  isMuted: boolean;
 }
 
 const NarrationPlayer = forwardRef<NarrationPlayerHandle, NarrationPlayerProps>(
   function NarrationPlayer({ nodeId, voiceSegments, onEnd, onSegmentChange }, ref) {
     const [isPlaying, setIsPlaying] = useState(false);
     const [isMuted, setIsMuted] = useState(false);
+    const isMutedRef = useRef(false);
+    useEffect(() => { isMutedRef.current = isMuted; }, [isMuted]);
     const [currentSpeaker, setCurrentSpeaker] = useState('');
     // Single persistent Audio element — prevents overlapping playback
     const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -44,7 +49,7 @@ const NarrationPlayer = forwardRef<NarrationPlayerHandle, NarrationPlayerProps>(
     const voiceSegmentsRef = useRef(voiceSegments);
     useEffect(() => { voiceSegmentsRef.current = voiceSegments; }, [voiceSegments]);
 
-    // Stop any current playback
+    // Stop any current playback (including preloaded audio)
     const stopAll = useCallback(() => {
       sessionRef.current++; // Invalidate all in-flight callbacks
       if (audioRef.current) {
@@ -53,8 +58,15 @@ const NarrationPlayer = forwardRef<NarrationPlayerHandle, NarrationPlayerProps>(
         audioRef.current.onerror = null;
         audioRef.current.pause();
         audioRef.current.removeAttribute('src');
-        audioRef.current.load(); // Release resources
+        audioRef.current.load();
       }
+      // Also stop all preloaded audio elements (the actual playing ones)
+      preloadCacheRef.current.forEach((a) => {
+        a.onplay = null;
+        a.onended = null;
+        a.onerror = null;
+        a.pause();
+      });
       if (typeof window !== 'undefined' && window.speechSynthesis) {
         window.speechSynthesis.cancel();
       }
@@ -64,7 +76,7 @@ const NarrationPlayer = forwardRef<NarrationPlayerHandle, NarrationPlayerProps>(
     // Play segments sequentially — preload next segments for gapless playback
     const preloadCacheRef = useRef<Map<string, HTMLAudioElement>>(new Map());
 
-    const playSegments = useCallback(() => {
+    const playSegments = useCallback((startFromIndex = 0) => {
       stopAll();
       // Clear old preload cache
       preloadCacheRef.current.forEach((a) => { a.pause(); a.removeAttribute('src'); });
@@ -78,16 +90,21 @@ const NarrationPlayer = forwardRef<NarrationPlayerHandle, NarrationPlayerProps>(
         return;
       }
 
-      const segmentsWithAudio = segments.filter((s) => s.audioUrl);
+      const segmentsWithAudio = segments.filter((s, i) => s.audioUrl && i >= startFromIndex);
       const useAudio = segmentsWithAudio.length > 0;
+      // Notify segment change immediately
+      if (startFromIndex > 0) {
+        onSegmentChangeRef.current?.(startFromIndex);
+      }
 
       if (useAudio) {
         // Preload all audio URLs upfront so there's no gap between segments
         const preloadAudio = (url: string): HTMLAudioElement => {
           const cached = preloadCacheRef.current.get(url);
-          if (cached) return cached;
+          if (cached) { cached.volume = isMutedRef.current ? 0 : 1; return cached; }
           const a = new Audio();
           a.preload = 'auto';
+          a.volume = isMutedRef.current ? 0 : 1;
           a.src = url;
           preloadCacheRef.current.set(url, a);
           return a;
@@ -175,21 +192,29 @@ const NarrationPlayer = forwardRef<NarrationPlayerHandle, NarrationPlayerProps>(
 
     const stop = useCallback(() => {
       stopAll();
-      // Stop all preloaded audio too
-      preloadCacheRef.current.forEach((a) => { a.pause(); a.onended = null; a.onerror = null; });
       setIsPlaying(false);
       setCurrentSpeaker('');
-      onEndRef.current?.();
+      // Note: do NOT call onEnd here — stop() is for manual pause/mute, not natural ending
     }, [stopAll]);
 
     const toggleMute = useCallback(() => {
-      setIsMuted((m) => !m);
-      if (!isMuted) {
-        stop();
-      }
-    }, [isMuted, stop]);
+      setIsMuted((m) => {
+        const newMuted = !m;
+        // Set volume on all active audio elements
+        preloadCacheRef.current.forEach((a) => { a.volume = newMuted ? 0 : 1; });
+        if (audioRef.current) audioRef.current.volume = newMuted ? 0 : 1;
+        return newMuted;
+      });
+    }, []);
 
-    useImperativeHandle(ref, () => ({ stop }), [stop]);
+    useImperativeHandle(ref, () => ({
+      stop,
+      playFromSegment: (index: number) => {
+        if (!isMuted) playSegments(index);
+      },
+      toggleMute,
+      isMuted,
+    }), [stop, isMuted, playSegments, toggleMute]);
 
     // Cleanup on unmount
     useEffect(() => {
@@ -214,84 +239,23 @@ const NarrationPlayer = forwardRef<NarrationPlayerHandle, NarrationPlayerProps>(
     const stopAllRef = useRef(stopAll);
     useEffect(() => { stopAllRef.current = stopAll; }, [stopAll]);
 
-    // Auto-play on node change only
+    // Auto-play on node change only (mute is just volume, doesn't affect playback)
     useEffect(() => {
       stopAllRef.current();
       setIsPlaying(false);
       setCurrentSpeaker('');
 
-      if (!isMuted && voiceSegmentsRef.current.length > 0) {
-        // Small delay to ensure stopAll's session increment takes effect
+      if (voiceSegmentsRef.current.length > 0) {
         const timer = setTimeout(() => playRef.current(), 50);
         return () => { clearTimeout(timer); stopAllRef.current(); };
       } else {
         onEndRef.current?.();
       }
       return () => { stopAllRef.current(); };
-    }, [nodeId, isMuted]);
+    }, [nodeId]);
 
-    return (
-      <div
-        className="flex items-center gap-3 px-5 py-2"
-        style={{ borderBottom: '1px solid var(--border)' }}
-      >
-        {/* Play/Pause */}
-        <button
-          onClick={isPlaying ? stop : playSegments}
-          className="p-1.5 rounded-full transition-colors"
-          style={{
-            background: isPlaying ? 'var(--accent-dim)' : 'transparent',
-            color: isPlaying ? 'var(--accent)' : 'var(--text-secondary)',
-          }}
-        >
-          {isPlaying ? (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-              <rect x="6" y="4" width="4" height="16" rx="1" />
-              <rect x="14" y="4" width="4" height="16" rx="1" />
-            </svg>
-          ) : (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-              <polygon points="5 3 19 12 5 21 5 3" />
-            </svg>
-          )}
-        </button>
-
-        {/* Speaker indicator */}
-        <div className="flex-1">
-          {currentSpeaker ? (
-            <div className="flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: 'var(--accent)' }} />
-              <span className="text-[10px]" style={{ color: 'var(--accent)' }}>
-                {currentSpeaker} 说话中
-              </span>
-            </div>
-          ) : (
-            <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-              点击播放配音
-            </span>
-          )}
-        </div>
-
-        {/* Mute toggle */}
-        <button
-          onClick={toggleMute}
-          className="p-1.5 rounded-full"
-          style={{ color: isMuted ? 'var(--danger)' : 'var(--text-secondary)' }}
-        >
-          {isMuted ? (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-              <line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" />
-            </svg>
-          ) : (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-              <path d="M19.07 4.93a10 10 0 0 1 0 14.14" /><path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
-            </svg>
-          )}
-        </button>
-      </div>
-    );
+    // Audio-only component — no visible UI (mute button moved to GameplayView top bar)
+    return null;
   }
 );
 

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { submitImageGeneration, queryImageResult } from '@/lib/keling';
 
 export async function POST(request: NextRequest) {
-  const { prompt, aspectRatio, nodeId, image_list } = await request.json();
+  const { prompt, aspectRatio, nodeId, image_list, imageFidelity } = await request.json();
 
   if (!prompt) {
     return NextResponse.json({ success: false, error: 'prompt is required' }, { status: 400 });
@@ -12,6 +12,7 @@ export async function POST(request: NextRequest) {
     const taskId = await submitImageGeneration({
       prompt,
       aspect_ratio: aspectRatio || '16:9',
+      image_fidelity: imageFidelity || 'normal',
       image_list: image_list || undefined,
     });
 

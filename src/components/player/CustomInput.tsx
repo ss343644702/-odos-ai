@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { usePlayerStore } from '@/stores/playerStore';
 import { v4 as uuid } from 'uuid';
 import ButterflyLoading from './ButterflyLoading';
@@ -26,9 +26,12 @@ const MAX_RETRIES = 2;
 
 export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
   const [input, setInput] = useState('');
+  const [rejectMessage, setRejectMessage] = useState('');
+  const [submittedText, setSubmittedText] = useState('');
   const submitCustomInput = usePlayerStore((s) => s.submitCustomInput);
   const setBranching = usePlayerStore((s) => s.setBranching);
   const setCurrentNode = usePlayerStore((s) => s.setCurrentNode);
+  const navigateToNode = usePlayerStore((s) => s.navigateToNode);
   const addGeneratedNodes = usePlayerStore((s) => s.addGeneratedNodes);
   const updateGeneratedNode = usePlayerStore((s) => s.updateGeneratedNode);
   const addGeneratedBranch = usePlayerStore((s) => s.addGeneratedBranch);
@@ -67,9 +70,10 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
       mainPlotNodeIds: story?.nodes?.filter((n) => n.type !== 'ai_generated').map((n) => n.id) || [],
       mainPlotNodes: story?.nodes?.filter((n) => n.type !== 'ai_generated').map((n) => ({
         id: n.id, type: n.type, title: n.data.title, narration: n.data.narration?.slice(0, 200),
+        choices: n.data.choices?.map((c) => ({ id: c.id, text: c.text, targetNodeId: c.targetNodeId })),
       })) || [],
       style: story?.style || null,
-      entities: null,
+      entities: story?.entities || null,
       defaultVoice: story?.settings?.defaultVoice || 'narrator',
       branchDepth,
       convergenceTarget,
@@ -118,6 +122,37 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
       }
     }
   }, [storyId, story, updateGeneratedNode, addGeneratedNodes]);
+
+  // Auto-prefetch: when entering a new node, check if its children need prefetch
+  // Only depend on nodeId to avoid re-triggering when story.nodes updates from prefetch results
+  const prefetchTriggeredRef = useRef<string>('');
+  useEffect(() => {
+    // Skip if we already triggered prefetch for this node
+    if (prefetchTriggeredRef.current === nodeId) return;
+
+    const currentStory = usePlayerStore.getState().story;
+    const allNodes = currentStory?.nodes || [];
+    const currentNode = allNodes.find((n) => n.id === nodeId);
+    if (!currentNode) return;
+
+    const choices = currentNode.data.choices || [];
+    if (choices.length === 0) return;
+
+    const childStubs = choices
+      .map((c: any) => allNodes.find((n) => n.id === c.targetNodeId))
+      .filter((n: any) => n && needsPrefetch(n));
+
+    if (childStubs.length === 0) return;
+
+    // Mark as triggered for this node
+    prefetchTriggeredRef.current = nodeId;
+
+    const meta = currentNode.data.metadata || {};
+    const ct = meta.convergenceTarget ||
+      allNodes.filter((n) => n.type !== 'ai_generated').map((n) => n.id)[0] || '';
+
+    runPrefetch(childStubs, 1, ct);
+  }, [nodeId, runPrefetch]);
 
   /** Call pipeline with retry */
   const callPipeline = useCallback(async (text: string) => {
@@ -176,7 +211,7 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
           return node ? { title: node.data.title, narration: node.data.narration, dialogue: node.data.dialogue, character: node.data.character } : null;
         })(),
         style: story?.style || null,
-        entities: null,
+        entities: story?.entities || null,
         defaultVoice: story?.settings?.defaultVoice || 'narrator',
       };
     };
@@ -205,6 +240,7 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
     if (!text || isBranching) return;
 
     setInput('');
+    setSubmittedText(text);
     // Cancel any in-flight prefetch before starting new pipeline
     prefetchAbortRef.current?.abort();
     // Show loading IMMEDIATELY
@@ -251,19 +287,20 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
 
     if (!result) {
       setBranching(false);
-      alert('生成失败，请重试');
+      setRejectMessage('生成失败，请重试');
+      setTimeout(() => setRejectMessage(''), 5000);
       return;
     }
 
     if (result.action === 'reject') {
       setBranching(false);
-      alert(result.message || '在想什么呢，重新做一个选择吧');
+      setRejectMessage(result.message || '大白天想什么呢，重新选择一下吧');
+      setTimeout(() => setRejectMessage(''), 5000);
       return;
     }
 
     if (result.action === 'navigate_existing' && result.targetNodeId) {
-      const targetNode = story?.nodes?.find((n) => n.id === result.targetNodeId);
-      if (targetNode) setCurrentNode(targetNode);
+      navigateToNode(result.targetNodeId, text);
       setBranching(false);
       return;
     }
@@ -319,7 +356,7 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
         style={{ border: '1px dashed var(--accent)', background: 'var(--bg-tertiary)' }}
       >
         {isBranching ? (
-          <ButterflyLoading />
+          <ButterflyLoading prefix={submittedText} />
         ) : (
           <>
             <input
@@ -343,8 +380,8 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
         )}
       </div>
       {!isBranching && (
-        <p className="text-[10px] mt-1 text-center" style={{ color: 'var(--text-muted)' }}>
-          自由输入你想做的选择，AI 会为你推理剧情走向
+        <p className="text-[10px] mt-1 text-center" style={{ color: rejectMessage ? 'var(--danger)' : 'var(--text-muted)' }}>
+          {rejectMessage || '自由输入你想做的选择，AI 会为你推理剧情走向'}
         </p>
       )}
     </div>

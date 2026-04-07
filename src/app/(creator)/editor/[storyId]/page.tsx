@@ -150,6 +150,7 @@ export default function EditorPage() {
                 style: s.style,
                 worldView: s.worldView,
               },
+              entities: s.entities || undefined,
             }),
           });
         } catch {

@@ -1,17 +1,14 @@
-// LLM API Client - Using OpenRouter SDK
-// With: tracing, retry with exponential backoff, MiniMax fallback
+// LLM API Client - DeepSeek direct API (primary) + MiniMax (fallback)
+// With: tracing, retry with exponential backoff
 
-import { OpenRouter } from '@openrouter/sdk';
 import { generateTraceId, estimateTokens, recordTrace } from './trace';
 
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
-const OPENROUTER_MODEL = 'deepseek/deepseek-chat-v3';
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || '';
+const DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions';
+const DEEPSEEK_MODEL = 'deepseek-chat';
 
 const MINIMAX_API_KEY = process.env.MINIMAX_API_KEY || '';
 const MINIMAX_API_URL = 'https://api.minimaxi.chat/v1/text/chatcompletion_v2';
-
-// Shared OpenRouter client instance
-const openrouter = new OpenRouter({ apiKey: OPENROUTER_API_KEY });
 
 interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -25,7 +22,6 @@ interface ChatMessage {
 const MAX_RETRIES = 2;
 const INITIAL_BACKOFF_MS = 1000;
 
-/** Determine if an error is transient (worth retrying) */
 function isTransientError(status: number, errorText: string): boolean {
   if ([429, 500, 502, 503, 504].includes(status)) return true;
   if (errorText.includes('ECONNRESET') || errorText.includes('ETIMEDOUT')) return true;
@@ -37,184 +33,87 @@ async function sleep(ms: number): Promise<void> {
 }
 
 // ──────────────────────────────────────────────
-// MiniMax fallback fetch (kept as raw fetch)
+// Core fetch with retry (works for both DeepSeek and MiniMax)
 // ──────────────────────────────────────────────
 
-async function fetchMiniMax(
-  messages: ChatMessage[],
-  temperature: number,
-  maxTokens: number,
+async function fetchWithRetry(
+  url: string,
+  apiKey: string,
+  body: Record<string, unknown>,
   traceId: string,
   skill?: string,
-): Promise<string> {
-  const model = 'MiniMax-Text-01';
-  const inputTokens = estimateTokens(JSON.stringify(messages));
-  const start = Date.now();
-
-  const response = await fetch(MINIMAX_API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${MINIMAX_API_KEY}`,
-    },
-    body: JSON.stringify({ model, messages, temperature, max_tokens: maxTokens }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    recordTrace({
-      traceId, skill, model, inputTokensEstimate: inputTokens, outputTokensEstimate: 0,
-      latencyMs: Date.now() - start, status: 'error',
-      error: `${response.status}: ${errorText.slice(0, 200)}`,
-      timestamp: new Date().toISOString(),
-    });
-    throw new Error(`MiniMax API error: ${response.status} - ${errorText}`);
-  }
-
-  const result = await response.json();
-  const content = result.choices?.[0]?.message?.content || '';
-  recordTrace({
-    traceId, skill, model, inputTokensEstimate: inputTokens,
-    outputTokensEstimate: estimateTokens(content),
-    latencyMs: Date.now() - start, status: 'success',
-    timestamp: new Date().toISOString(),
-  });
-  return content;
-}
-
-// ──────────────────────────────────────────────
-// OpenRouter SDK call with retry
-// ──────────────────────────────────────────────
-
-async function callOpenRouter(
-  messages: ChatMessage[],
-  temperature: number,
-  maxTokens: number,
-  traceId: string,
-  skill?: string,
-  model?: string,
-): Promise<string> {
-  const modelId = model || OPENROUTER_MODEL;
-  const inputTokens = estimateTokens(JSON.stringify(messages));
+): Promise<{ content: string; model: string }> {
+  const model = body.model as string;
+  const inputTokens = estimateTokens(JSON.stringify(body.messages));
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const start = Date.now();
     try {
-      const result = openrouter.callModel({
-        model: modelId,
-        instructions: messages.find(m => m.role === 'system')?.content,
-        input: messages.filter(m => m.role !== 'system').map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-        temperature,
-        maxOutputTokens: maxTokens,
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(body),
       });
 
-      const text = await result.getText();
-
-      recordTrace({
-        traceId, skill, model: modelId, inputTokensEstimate: inputTokens,
-        outputTokensEstimate: estimateTokens(text),
-        latencyMs: Date.now() - start, status: 'success', retryCount: attempt,
-        timestamp: new Date().toISOString(),
-      });
-
-      return text;
-    } catch (err: any) {
-      const errMsg = err.message || String(err);
-      const status = err.status || 0;
-
-      if (attempt < MAX_RETRIES && isTransientError(status, errMsg)) {
+      if (!response.ok) {
+        const errorText = await response.text();
+        if (attempt < MAX_RETRIES && isTransientError(response.status, errorText)) {
+          recordTrace({
+            traceId, skill, model, inputTokensEstimate: inputTokens, outputTokensEstimate: 0,
+            latencyMs: Date.now() - start, status: 'retry',
+            error: `${response.status}: ${errorText.slice(0, 200)}`,
+            retryCount: attempt + 1, timestamp: new Date().toISOString(),
+          });
+          await sleep(INITIAL_BACKOFF_MS * Math.pow(2, attempt));
+          continue;
+        }
         recordTrace({
-          traceId, skill, model: modelId, inputTokensEstimate: inputTokens,
-          outputTokensEstimate: 0, latencyMs: Date.now() - start,
-          status: 'retry', error: errMsg.slice(0, 200), retryCount: attempt + 1,
+          traceId, skill, model, inputTokensEstimate: inputTokens, outputTokensEstimate: 0,
+          latencyMs: Date.now() - start, status: 'error',
+          error: `${response.status}: ${errorText.slice(0, 200)}`,
+          retryCount: attempt, timestamp: new Date().toISOString(),
+        });
+        throw new Error(`${model} API error: ${response.status} - ${errorText}`);
+      }
+
+      const result = await response.json();
+      const content = result.choices?.[0]?.message?.content || '';
+      recordTrace({
+        traceId, skill, model, inputTokensEstimate: inputTokens,
+        outputTokensEstimate: estimateTokens(content),
+        latencyMs: Date.now() - start, status: 'success',
+        retryCount: attempt, timestamp: new Date().toISOString(),
+      });
+      return { content, model };
+    } catch (error: any) {
+      if (error.message?.includes('API error')) throw error;
+      if (attempt < MAX_RETRIES) {
+        recordTrace({
+          traceId, skill, model, inputTokensEstimate: inputTokens, outputTokensEstimate: 0,
+          latencyMs: Date.now() - start, status: 'retry',
+          error: error.message?.slice(0, 200), retryCount: attempt + 1,
           timestamp: new Date().toISOString(),
         });
         await sleep(INITIAL_BACKOFF_MS * Math.pow(2, attempt));
         continue;
       }
-
       recordTrace({
-        traceId, skill, model: modelId, inputTokensEstimate: inputTokens,
-        outputTokensEstimate: 0, latencyMs: Date.now() - start,
-        status: 'error', error: errMsg.slice(0, 200), retryCount: attempt,
+        traceId, skill, model, inputTokensEstimate: inputTokens, outputTokensEstimate: 0,
+        latencyMs: Date.now() - start, status: 'error',
+        error: error.message?.slice(0, 200), retryCount: attempt,
         timestamp: new Date().toISOString(),
       });
-      throw err;
+      throw error;
     }
   }
-
-  throw new Error(`${modelId}: max retries exceeded`);
+  throw new Error(`${model}: max retries exceeded`);
 }
 
 // ──────────────────────────────────────────────
-// OpenRouter SDK streaming call
-// ──────────────────────────────────────────────
-
-async function streamOpenRouter(
-  messages: ChatMessage[],
-  temperature: number,
-  maxTokens: number,
-  traceId: string,
-  onChunk: (text: string) => void,
-  onDone: () => void,
-  model?: string,
-): Promise<void> {
-  const modelId = model || OPENROUTER_MODEL;
-  const inputTokens = estimateTokens(JSON.stringify(messages));
-  const start = Date.now();
-
-  try {
-    const result = openrouter.callModel({
-      model: modelId,
-      instructions: messages.find(m => m.role === 'system')?.content,
-      input: messages.filter(m => m.role !== 'system').map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-      temperature,
-      maxOutputTokens: maxTokens,
-    });
-
-    let fullText = '';
-
-    // Use items-based streaming (replace by ID, don't accumulate)
-    for await (const item of result.getItemsStream()) {
-      if (item.type === 'message') {
-        const textContent = item.content?.find((c: { type: string }) => c.type === 'output_text');
-        if (textContent && 'text' in textContent) {
-          const newText = (textContent as any).text as string;
-          if (newText.length > fullText.length) {
-            const delta = newText.slice(fullText.length);
-            fullText = newText;
-            onChunk(delta);
-          }
-        }
-      }
-    }
-
-    // Fallback: if items-stream didn't capture text, get it directly
-    if (!fullText) {
-      fullText = await result.getText();
-      if (fullText) onChunk(fullText);
-    }
-
-    recordTrace({
-      traceId, model: modelId, inputTokensEstimate: inputTokens,
-      outputTokensEstimate: estimateTokens(fullText),
-      latencyMs: Date.now() - start, status: 'success',
-      timestamp: new Date().toISOString(),
-    });
-    onDone();
-  } catch (err: any) {
-    recordTrace({
-      traceId, model: modelId, inputTokensEstimate: inputTokens,
-      outputTokensEstimate: 0, latencyMs: Date.now() - start,
-      status: 'error', error: (err.message || '').slice(0, 200),
-      timestamp: new Date().toISOString(),
-    });
-    throw err;
-  }
-}
-
-// ──────────────────────────────────────────────
-// Public API: callLLM with OpenRouter → MiniMax fallback
+// Public API: callLLM — DeepSeek → MiniMax fallback
 // ──────────────────────────────────────────────
 
 export async function callLLM(params: {
@@ -231,24 +130,21 @@ export async function callLLM(params: {
   const traceId = generateTraceId();
 
   try {
-    return await callOpenRouter(
-      messages,
-      params.temperature || 0.7,
-      params.maxTokens || 4096,
-      traceId,
-      params.skill,
+    const { content } = await fetchWithRetry(
+      DEEPSEEK_API_URL, DEEPSEEK_API_KEY,
+      { model: DEEPSEEK_MODEL, messages, temperature: params.temperature || 0.7, max_tokens: params.maxTokens || 4096 },
+      traceId, params.skill,
     );
+    return content;
   } catch {
-    // Fallback to MiniMax
-    if (!MINIMAX_API_KEY) throw new Error('OpenRouter failed and no MiniMax fallback configured');
-    console.log(`[LLM fallback] OpenRouter failed, trying MiniMax | ${traceId}`);
-    return await fetchMiniMax(
-      messages,
-      params.temperature || 0.7,
-      params.maxTokens || 4096,
-      traceId + '_fallback',
-      params.skill,
+    if (!MINIMAX_API_KEY) throw new Error('DeepSeek failed and no MiniMax fallback configured');
+    console.log(`[LLM fallback] DeepSeek failed, trying MiniMax | ${traceId}`);
+    const { content } = await fetchWithRetry(
+      MINIMAX_API_URL, MINIMAX_API_KEY,
+      { model: 'MiniMax-Text-01', messages, temperature: params.temperature || 0.7, max_tokens: params.maxTokens || 4096 },
+      traceId + '_fallback', params.skill,
     );
+    return content;
   }
 }
 
@@ -267,18 +163,67 @@ export async function callLLMStream(params: {
     { role: 'user', content: params.userMessage },
   ];
   const traceId = generateTraceId();
+  const start = Date.now();
 
-  await streamOpenRouter(
-    messages,
-    params.temperature || 0.7,
-    params.maxTokens || 4096,
-    traceId,
-    params.onChunk,
-    params.onDone,
-  );
+  const response = await fetch(DEEPSEEK_API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${DEEPSEEK_API_KEY}` },
+    body: JSON.stringify({
+      model: DEEPSEEK_MODEL, messages,
+      temperature: params.temperature || 0.7, max_tokens: params.maxTokens || 4096, stream: true,
+    }),
+  });
+
+  if (!response.ok || !response.body) {
+    recordTrace({
+      traceId, model: DEEPSEEK_MODEL, inputTokensEstimate: estimateTokens(JSON.stringify(messages)),
+      outputTokensEstimate: 0, latencyMs: Date.now() - start,
+      status: 'error', error: `Stream error: ${response.status}`, timestamp: new Date().toISOString(),
+    });
+    throw new Error(`DeepSeek stream error: ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let fullOutput = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        const data = line.slice(6).trim();
+        if (data === '[DONE]') {
+          recordTrace({
+            traceId, model: DEEPSEEK_MODEL, inputTokensEstimate: estimateTokens(JSON.stringify(messages)),
+            outputTokensEstimate: estimateTokens(fullOutput), latencyMs: Date.now() - start,
+            status: 'success', timestamp: new Date().toISOString(),
+          });
+          params.onDone();
+          return;
+        }
+        try {
+          const parsed = JSON.parse(data);
+          const content = parsed.choices?.[0]?.delta?.content;
+          if (content) { fullOutput += content; params.onChunk(content); }
+        } catch { /* skip */ }
+      }
+    }
+  }
+
+  recordTrace({
+    traceId, model: DEEPSEEK_MODEL, inputTokensEstimate: estimateTokens(JSON.stringify(messages)),
+    outputTokensEstimate: estimateTokens(fullOutput), latencyMs: Date.now() - start,
+    status: 'success', timestamp: new Date().toISOString(),
+  });
+  params.onDone();
 }
 
-// Multi-turn call for ReAct agent — accepts full message array
+// Multi-turn call — accepts full message array
 export async function callLLMMultiTurn(params: {
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
   temperature?: number;
@@ -287,20 +232,15 @@ export async function callLLMMultiTurn(params: {
   skill?: string;
 }): Promise<string> {
   const traceId = generateTraceId();
-  return await callOpenRouter(
-    params.messages,
-    params.temperature ?? 0.3,
-    params.maxTokens ?? 2048,
-    traceId,
-    params.skill || 'multi_turn',
-    params.model,
+  const { content } = await fetchWithRetry(
+    DEEPSEEK_API_URL, DEEPSEEK_API_KEY,
+    { model: params.model || DEEPSEEK_MODEL, messages: params.messages, temperature: params.temperature ?? 0.3, max_tokens: params.maxTokens ?? 2048 },
+    traceId, params.skill || 'multi_turn',
   );
+  return content;
 }
 
-// ============================================================
-// ReAct agent call (via OpenRouter SDK)
-// ============================================================
-
+// ReAct agent call
 export async function callDeepSeek(params: {
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
   temperature?: number;
@@ -308,14 +248,12 @@ export async function callDeepSeek(params: {
   model?: string;
 }): Promise<string> {
   const traceId = generateTraceId();
-  return await callOpenRouter(
-    params.messages,
-    params.temperature ?? 0.3,
-    params.maxTokens ?? 2048,
-    traceId,
-    'react_agent',
-    params.model,
+  const { content } = await fetchWithRetry(
+    DEEPSEEK_API_URL, DEEPSEEK_API_KEY,
+    { model: params.model || DEEPSEEK_MODEL, messages: params.messages, temperature: params.temperature ?? 0.3, max_tokens: params.maxTokens ?? 2048 },
+    traceId, 'react_agent',
   );
+  return content;
 }
 
 // ============================================================
@@ -323,10 +261,7 @@ export async function callDeepSeek(params: {
 // ============================================================
 
 export function parseJsonFromResponse(text: string): any {
-  // Extract JSON from markdown code blocks or raw text
   const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || text.match(/(\{[\s\S]*\})/);
-
-  // If no closing }, JSON is probably truncated — grab everything from first {
   let jsonStr: string;
   if (jsonMatch) {
     jsonStr = jsonMatch[1].trim();
@@ -336,24 +271,10 @@ export function parseJsonFromResponse(text: string): any {
     jsonStr = text.slice(startIdx).trim();
   }
 
-  // ═══ Attempt 1: Direct parse ═══
-  try {
-    return JSON.parse(jsonStr);
-  } catch {
-    // Continue to repairs
-  }
+  try { return JSON.parse(jsonStr); } catch {}
+  try { return JSON.parse(repairTruncatedJson(jsonStr)); } catch {}
 
-  // ═══ Attempt 2: Truncation repair only ═══
-  try {
-    const truncated = repairTruncatedJson(jsonStr);
-    return JSON.parse(truncated);
-  } catch {
-    // Continue to aggressive repairs
-  }
-
-  // ═══ Attempt 3: Markdown/formatting cleanup ═══
   let cleaned = jsonStr;
-
   cleaned = cleaned.replace(/:\s*\*\*([^*\n]*)\*\*/g, ': "$1"');
   cleaned = cleaned.replace(/\*\*/g, '');
   cleaned = cleaned.replace(/\/\/[^\n]*/g, '');
@@ -365,15 +286,9 @@ export function parseJsonFromResponse(text: string): any {
   cleaned = cleaned.replace(/(\}|\])(\s*\n\s*)"(?=[a-zA-Z_])/g, '$1,$2"');
   cleaned = cleaned.replace(/"(\s*\n\s*)"(?=[a-zA-Z_])/g, '",$1"');
 
-  try {
-    return JSON.parse(cleaned);
-  } catch {
-    try {
-      return JSON.parse(repairTruncatedJson(cleaned));
-    } catch {}
-  }
+  try { return JSON.parse(cleaned); } catch {}
+  try { return JSON.parse(repairTruncatedJson(cleaned)); } catch {}
 
-  // ═══ Attempt 4: Last resort — aggressive fixes ═══
   cleaned = cleaned.replace(/([{,]\s*)([a-zA-Z_][\w]*)\s*:/g, '$1"$2":');
   cleaned = cleaned.replace(
     /("[\w\u4e00-\u9fff]+")\s*:\s*(?!["'{\[\d\-tfn])([^\n,\]}"[\]]+)/g,
@@ -386,7 +301,7 @@ export function parseJsonFromResponse(text: string): any {
     try {
       const fs = require('fs');
       fs.writeFileSync('/tmp/llm-json-fail.txt',
-        `=== RAW TEXT (first 2000) ===\n${text.slice(0, 2000)}\n\n=== AFTER REPAIR (first 2000) ===\n${cleaned.slice(0, 2000)}\n\n=== ERROR ===\n${e.message}\n`);
+        `=== RAW ===\n${text.slice(0, 2000)}\n\n=== CLEANED ===\n${cleaned.slice(0, 2000)}\n\n=== ERROR ===\n${e.message}\n`);
     } catch {}
     throw new Error(`JSON parse failed after repair: ${e.message}`);
   }
@@ -394,7 +309,6 @@ export function parseJsonFromResponse(text: string): any {
 
 function repairTruncatedJson(json: string): string {
   let s = json;
-
   let inString = false;
   let lastStringStart = -1;
   for (let i = 0; i < s.length; i++) {
@@ -416,25 +330,18 @@ function repairTruncatedJson(json: string): string {
       s += '"';
     }
   }
-
   s = s.replace(/,\s*$/, '');
-
   const stack: string[] = [];
   inString = false;
   for (let i = 0; i < s.length; i++) {
-    if (s[i] === '"' && (i === 0 || s[i - 1] !== '\\')) {
-      inString = !inString;
-      continue;
-    }
+    if (s[i] === '"' && (i === 0 || s[i - 1] !== '\\')) { inString = !inString; continue; }
     if (inString) continue;
     if (s[i] === '{' || s[i] === '[') stack.push(s[i]);
     else if (s[i] === '}' || s[i] === ']') stack.pop();
   }
-
   while (stack.length > 0) {
     const opener = stack.pop();
     s += opener === '{' ? '}' : ']';
   }
-
   return s;
 }

@@ -3,6 +3,8 @@ import { callLLM, parseJsonFromResponse } from '@/lib/claude';
 import { moderateContent, sanitizeOutput } from '@/lib/safety';
 import { synthesizeSpeech } from '@/lib/minimax-tts';
 import { uploadAudio } from '@/lib/oss';
+import { submitImageGeneration, pollImageResult } from '@/lib/keling';
+import { getEntityImageList } from '@/lib/entity-utils';
 import { VOICE_SYSTEM_PROMPT, VOICE_USER_PROMPT } from '@/lib/agent/prompts/voice';
 import { syncFramesFromVoice } from '@/types/story';
 import type { StoryNode, VoiceSegment, Frame } from '@/types/story';
@@ -25,27 +27,22 @@ const BRANCH_CONTINUE_PROMPT = `你是一个互动影游的剧情推理引擎。
 
 ## 输出格式 (JSON)
 {
-  "narration": "该节点的叙述文本（100-200字，第二人称'你'视角）",
+  "narration": "该节点的叙述文本（100-150字，第二人称'你'视角，简洁有力）",
   "title": "节点标题",
   "choices": [
     { "text": "选项文本", "type": "branch" },
-    { "text": "选项文本", "type": "converge", "converge_narration": "50-100字过渡叙述" },
-    { "text": "选项文本", "type": "ending" }
+    { "text": "选项文本", "type": "converge", "converge_narration": "50-100字过渡到目标主线节点开头" }
   ]
 }
 
 ## 要求
-- narration 使用第二人称"你"视角
+- narration 100-150字，使用第二人称"你"视角
 - 叙述要承接上一步的选择，有因果关系
-- choices 生成2-3个选项：
-  - branch（优先）: 继续探索新路径，有完整后续故事
-  - converge: 通过过渡剧情自然回到主线，**必须附带 converge_narration**
-  - ending: 走向新结局（谨慎使用）
-- **所有选项都必须有后续剧情，不能直接跳回主线**
-- 选项文字用简洁动作短语，不要加"我"字开头
-- 推荐组合: 1个 branch + 1个 converge
-- 分支深度0时，以 branch 为主，可再探索一步
-- 分支深度1+时，推荐 2个 converge + 1个 ending(可选)，自然收束回主线`;
+- 恰好生成 **2 个选项**：
+  - **branch（1个）**: 继续探索新路径
+  - **converge（1个）**: 通过过渡剧情自然回到主线，**必须附带 converge_narration**，描述如何过渡到目标节点的**开头情境**
+- converge 的收束目标 = 主线节点的**开头**，确保过渡后能自然接上该节点的第一句话
+- 选项文字用简洁动作短语，不要加"我"字开头`;
 
 const BRIDGE_PROMPT = `你是一个互动影游的剧情过渡引擎。你的任务是为支线剧情生成**回归主线的过渡叙述**。
 
@@ -71,8 +68,12 @@ const BRIDGE_PROMPT = `你是一个互动影游的剧情过渡引擎。你的任
 ## 写作要求
 - **canConnect=true 时**：narration 前半段描述支线经历的影响，后半段自然过渡到目标场景的情境，让读完后直接进入主线节点不会觉得突兀
 - **canConnect=false 时**：narration 描述朝目标方向推进一步的剧情（不要硬跳），nextBridgeHint 给出下一步过渡的方向
-- 禁止使用 meta 描述（如"故事回到了主线"、"命运的齿轮"等套话）
-- 要有具体的画面感：人物在做什么、看到什么、感受到什么`;
+- **严禁**使用以下套话和 meta 描述：
+  - "无论你之前选择了哪条路"、"殊途同归"、"命运的齿轮"
+  - "故事回到了主线"、"命运交汇"、"所有道路汇聚于此"
+  - 任何暗示"多条路线合并"的表述
+- 要有具体的画面感：人物在做什么、看到什么、感受到什么
+- 叙述必须是具体的剧情推进，不能是抽象的命运感慨`;
 
 /** Generate full content for a single node (storyboard + voice in parallel, then TTS) */
 async function generateNodeContent(
@@ -84,6 +85,7 @@ async function generateNodeContent(
   const nodeId = node.id;
 
   const narrationText = node.data.narration || '';
+  console.log(`[PREFETCH-CONTENT] node=${node.id}, hasNarration=${!!narrationText}, hasEntities=${!!entities}`);
 
   // Skip LLM calls if no narration content — use direct fallback
   if (!narrationText) {
@@ -93,10 +95,7 @@ async function generateNodeContent(
     };
   }
 
-  // Skip storyboard LLM — images are not generated on player side (imageUrl always null).
-  // Only generate voice segments via LLM.
-  let frames: Frame[] = [{ id: `frame_${nodeId}_0`, narrationSegment: narrationText, imagePrompt: `${style?.stylePromptPrefix || ''} dramatic scene, cinematic lighting`, imageUrl: null, duration: 5 }];
-
+  // Generate voice segments via LLM
   const voiceResult = await callLLM({
     systemPrompt: VOICE_SYSTEM_PROMPT,
     userMessage: VOICE_USER_PROMPT(
@@ -122,32 +121,69 @@ async function generateNodeContent(
   let voiceSegments: VoiceSegment[] = voiceResult
     ? voiceResult.filter((s: VoiceSegment) => s.text.trim())
     : [{ id: `seg_${nodeId}_0`, text: narrationText, speaker: 'narrator', voiceType: (defaultVoice as any) || 'narrator', emotion: 'neutral', speed: 1.0, audioUrl: null }];
-  // Ensure at least one segment
   if (voiceSegments.length === 0) {
     voiceSegments = [{ id: `seg_${nodeId}_0`, text: narrationText, speaker: 'narrator', voiceType: (defaultVoice as any) || 'narrator', emotion: 'neutral', speed: 1.0, audioUrl: null }];
   }
 
-  // TTS generation (always)
-  await Promise.allSettled(
-    voiceSegments.map(async (seg, i) => {
-      try {
-        const cleanedText = seg.text
-          .replace(/[（(][^）)]*[画外音旁白场景切换音效背景][^）)]*[）)]/g, '')
-          .replace(/[\[【][^\]】]*[\]】]/g, '')
-          .replace(/\*[^*]+\*/g, '')
-          .replace(/——/g, '，')
-          .trim();
-        if (!cleanedText) return;
-        const audioBuffer = await synthesizeSpeech({
-          text: cleanedText.slice(0, 10000),
-          voiceType: (seg.voiceType as any) || 'narrator',
-          speed: seg.speed || 1.0,
-        });
-        const audioUrl = await uploadAudio(audioBuffer, `${nodeId}_seg${i}_${Date.now()}.mp3`);
-        voiceSegments[i] = { ...voiceSegments[i], audioUrl };
-      } catch { /* skip */ }
-    }),
-  );
+  // Prefetch nodes: max 2 frames (split at midpoint if narration is long enough)
+  const basePrompt = `${style?.stylePromptPrefix || ''} dramatic scene, cinematic lighting, ${node.data.title || ''}`;
+  let frames: Frame[];
+  if (narrationText.length >= 100) {
+    const mid = Math.floor(narrationText.length / 2);
+    const splitIdx = narrationText.indexOf('。', mid);
+    const splitAt = splitIdx > 0 ? splitIdx + 1 : mid;
+    frames = [
+      { id: `frame_${nodeId}_0`, narrationSegment: narrationText.slice(0, splitAt), imagePrompt: basePrompt, imageUrl: null, duration: Math.max(3, Math.ceil(splitAt / 15)) },
+      { id: `frame_${nodeId}_1`, narrationSegment: narrationText.slice(splitAt), imagePrompt: basePrompt, imageUrl: null, duration: Math.max(3, Math.ceil((narrationText.length - splitAt) / 15)) },
+    ];
+  } else {
+    frames = [{ id: `frame_${nodeId}_0`, narrationSegment: narrationText, imagePrompt: basePrompt, imageUrl: null, duration: Math.max(3, Math.ceil(narrationText.length / 15)) }];
+  }
+
+  // TTS + Image generation in PARALLEL
+  await Promise.allSettled([
+    // TTS
+    Promise.allSettled(
+      voiceSegments.map(async (seg, i) => {
+        try {
+          const cleanedText = seg.text
+            .replace(/[（(][^）)]*[画外音旁白场景切换音效背景][^）)]*[）)]/g, '')
+            .replace(/[\[【][^\]】]*[\]】]/g, '')
+            .replace(/\*[^*]+\*/g, '')
+            .replace(/——/g, '，')
+            .trim();
+          if (!cleanedText) return;
+          const audioBuffer = await synthesizeSpeech({
+            text: cleanedText.slice(0, 10000),
+            voiceType: (seg.voiceType as any) || 'narrator',
+            speed: seg.speed || 1.0,
+          });
+          const audioUrl = await uploadAudio(audioBuffer, `${nodeId}_seg${i}_${Date.now()}.mp3`);
+          voiceSegments[i] = { ...voiceSegments[i], audioUrl };
+        } catch { /* skip */ }
+      }),
+    ),
+    // Image generation (low fidelity, parallel per frame)
+    Promise.allSettled(
+      frames.map(async (frame) => {
+        try {
+          if (!frame.imagePrompt) { console.log(`[PREFETCH-IMG] skip: no imagePrompt`); return; }
+          console.log(`[PREFETCH-IMG] generating for ${frame.id}, prompt: ${frame.imagePrompt.slice(0, 60)}...`);
+          const imageList = entities ? getEntityImageList(entities, (frame as any).entityRefs, node.data.character) : [];
+          const taskId = await submitImageGeneration({
+            prompt: frame.imagePrompt,
+            model_name: 'kling-v1',
+            aspect_ratio: '16:9',
+            image_list: imageList.length > 0 ? imageList : undefined,
+          });
+          console.log(`[PREFETCH-IMG] submitted taskId=${taskId}`);
+          const result = await pollImageResult(taskId, { maxAttempts: 15, initialDelay: 3000, endpoint: '/v1/images/generations' });
+          console.log(`[PREFETCH-IMG] result: status=${result.status}, hasUrl=${!!result.imageUrl}`);
+          if (result.imageUrl) frame.imageUrl = result.imageUrl;
+        } catch (err: any) { console.error(`[PREFETCH-IMG] error: ${err.message}`); }
+      }),
+    ),
+  ]);
 
   if (frames.length > 0) {
     frames = syncFramesFromVoice(frames, voiceSegments);
@@ -249,19 +285,73 @@ export async function POST(request: NextRequest) {
       if (bridge.title) node.data.title = bridge.title;
 
       const canConnect = forceConnect || bridge.canConnect !== false;
+      const updatedBridgeContext = `${meta.storyContext || ''}\n[过渡] ${(node.data.narration || '').slice(0, 200)}`.slice(-800);
 
       if (canConnect) {
-        // Ready to connect to mainline — single "继续" choice
-        node.data.choices = [{
-          id: `choice_${node.id}_main`,
-          text: `继续`,
-          targetNodeId: bridgeTarget,
-        }];
+        // Find the target mainline node to check if it has choices
+        const targetNode = (mainPlotNodes || []).find((n: any) => n.id === bridgeTarget);
+
+        console.log(`[BRIDGE] canConnect=true, targetNode=${targetNode?.id}, choices=${targetNode?.choices?.length || 0}`);
+        if (targetNode && targetNode.choices?.length > 0) {
+          // Generate an "alternative mainline node" with context-aware narration + same choices
+          try {
+            const altResponse = await callLLM({
+              systemPrompt: `你是一个互动影游的剧情引擎。玩家刚经历了一段过渡（上一个节点），现在需要写"到达目标场景后"的叙述。
+要求：
+- 100-150字，第二人称"你"视角
+- **不要重复上一个节点的过渡内容**（过渡已经讲完了，你要写的是到达后的场景）
+- 直接描写目标情境：玩家现在在哪、看到什么、面对什么局面
+- 叙述结束时的情境要和目标主线节点一致，让后续选项逻辑上讲得通
+- 输出JSON: {"narration": "...", "title": "..."}`,
+              userMessage: `## 上一个节点的过渡叙述（不要重复这段内容）\n${node.data.narration || ''}\n\n## 目标主线节点\n标题: ${targetNode.title || ''}\n叙述: ${targetNode.narration || ''}\n\n## 目标主线节点的选项（你的叙述结束后玩家会看到这些）\n${(targetNode.choices || []).map((c: any) => `- ${c.text}`).join('\n')}\n\n请直接写到达目标场景后的叙述，不要重复过渡内容。`,
+              temperature: 0.7,
+              maxTokens: 1024,
+            });
+            const alt = parseJsonFromResponse(altResponse);
+
+            const altNodeId = `ai_alt_${Date.now()}_${node.id}`;
+            nodeExtraNodes.push({
+              id: altNodeId, type: 'ai_generated' as const, position: { x: 0, y: 0 },
+              data: {
+                title: alt.title || targetNode.title || '命运转折',
+                narration: alt.narration || bridge.narration || '',
+                dialogue: null, character: null, imageUrl: null, imagePrompt: '', audioUrl: null,
+                choices: (targetNode.choices || []).map((c: any) => ({
+                  id: `choice_alt_${altNodeId}_${c.id || Date.now()}`,
+                  text: c.text,
+                  targetNodeId: c.targetNodeId,
+                })),
+                allowCustomInput: true, depth: 0, voiceSegments: [], frames: [],
+                metadata: { tags: ['ai_generated', 'alt_mainline'], storyContext: updatedBridgeContext },
+              },
+            });
+
+            // Bridge points to the alternative node, not directly to mainline
+            node.data.choices = [{
+              id: `choice_${node.id}_alt`,
+              text: '继续',
+              targetNodeId: altNodeId,
+            }];
+          } catch {
+            // Fallback: point directly to mainline if LLM fails
+            node.data.choices = [{
+              id: `choice_${node.id}_main`,
+              text: '继续',
+              targetNodeId: bridgeTarget,
+            }];
+          }
+        } else {
+          // Target has no choices (ending node) — point directly
+          node.data.choices = [{
+            id: `choice_${node.id}_main`,
+            text: '继续',
+            targetNodeId: bridgeTarget,
+          }];
+        }
       } else {
         // Need more bridging — create next bridge stub with accumulated context
         const nextBridgeId = `ai_bridge_${Date.now()}_${node.id}`;
         const nextHint = bridge.nextBridgeHint || '';
-        const updatedBridgeContext = `${meta.storyContext || ''}\n[过渡] ${(node.data.narration || '').slice(0, 200)}`.slice(-800);
         nodeExtraNodes.push({
           id: nextBridgeId, type: 'ai_generated', position: { x: 0, y: 0 },
           data: {
@@ -370,12 +460,30 @@ export async function POST(request: NextRequest) {
               return { id: `choice_${node.id}_${i}`, text: c.text, targetNodeId: convergeNodeId };
             } else if (c.type === 'branch' && maxDepth < 1) {
               const branchNodeId = `ai_branch_${Date.now()}_${node.id}_${i}`;
+              // Create converge_bridge fallback for branch node
+              const branchConvergeId = `ai_branch_converge_${Date.now()}_${node.id}_${i}`;
+              nodeExtraNodes.push({
+                id: branchConvergeId, type: 'ai_generated', position: { x: 0, y: 0 },
+                data: {
+                  title: '回到主线', narration: '',
+                  dialogue: null, character: null, imageUrl: null, imagePrompt: '', audioUrl: null,
+                  choices: [{ id: `choice_${branchConvergeId}_main`, text: '继续', targetNodeId: target }],
+                  allowCustomInput: false, depth: 0, voiceSegments: [], frames: [],
+                  metadata: {
+                    tags: ['ai_generated', 'converge_bridge'],
+                    storyContext: updatedContext,
+                    convergenceTarget: target,
+                    convergenceHint: '',
+                    bridgeDepth: 0,
+                  },
+                },
+              });
               nodeExtraNodes.push({
                 id: branchNodeId, type: 'ai_generated', position: { x: 0, y: 0 },
                 data: {
                   title: c.text, narration: '',
                   dialogue: null, character: null, imageUrl: null, imagePrompt: '', audioUrl: null,
-                  choices: [{ id: `choice_${branchNodeId}_back`, text: '回到主线', targetNodeId: target }],
+                  choices: [{ id: `choice_${branchNodeId}_back`, text: '回到故事主线', targetNodeId: branchConvergeId }],
                   allowCustomInput: true, depth: 0, voiceSegments: [], frames: [],
                   metadata: { tags: ['ai_generated', 'branch_continue'], storyContext: updatedContext },
                 },

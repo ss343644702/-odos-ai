@@ -25,6 +25,7 @@ export interface Story {
   worldView: string;
   style: StyleConfig | null;
   playerObjective?: PlayerObjective | null;
+  entities?: EntityCollection | null;
 }
 
 export interface StorySettings {

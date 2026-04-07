@@ -65,7 +65,13 @@
       "Bash(cat \"/Users/bytedance/AI斯坦福/src/app/\\(creator\\)/editor/[storyId]/page.tsx\")",
       "Bash(find /Users/bytedance/AI斯坦福 -type f -path \"*/\\(player\\)/play/*page.tsx\")",
       "Bash(find /Users/bytedance/AI斯坦福/src -type f -name *.tsx -o -name *.ts)",
-      "Bash(chmod +x \"/Users/bytedance/AI斯坦福/deploy.sh\")"
+      "Bash(chmod +x \"/Users/bytedance/AI斯坦福/deploy.sh\")",
+      "Bash(export PATH=/usr/local/bin:/opt/homebrew/bin:/Users/bytedance/.nvm/versions/node/*/bin:$PATH)",
+      "Read(//Users/bytedance/**)",
+      "Read(//usr/local/bin/**)",
+      "Read(//opt/homebrew/bin/**)",
+      "Bash(ls -la /Users/bytedance/AI斯坦福/src/app/\\\\\\(player\\\\\\)/)",
+      "Bash(export PATH=\"/usr/local/bin:/opt/homebrew/bin:$PATH\")"
     ]
   }
 }

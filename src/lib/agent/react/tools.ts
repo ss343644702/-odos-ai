@@ -1216,6 +1216,7 @@ const extractEntities: ToolExecutor = async (_input, ctx) => {
   }, ctx.signal);
 
   useChatStore.getState().setEntities(entities);
+  useStoryStore.getState().setEntities(entities);
 
   return {
     tool: 'extract_entities', success: true,
@@ -1289,6 +1290,10 @@ const generateEntityImages: ToolExecutor = async (_input, ctx) => {
       }
     }
   }
+
+  // Sync updated entities (with imageUrls) to storyStore for auto-save
+  const updatedEntities = useChatStore.getState().orchestrator.entities;
+  if (updatedEntities) useStoryStore.getState().setEntities(updatedEntities);
 
   return {
     tool: 'generate_entity_images', success: true,

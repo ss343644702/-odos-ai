@@ -3,8 +3,9 @@
   "configurations": [
     {
       "name": "story-game",
-      "runtimeExecutable": "npx",
-      "runtimeArgs": ["next", "dev"],
+      "runtimeExecutable": "/usr/local/bin/node",
+      "runtimeArgs": ["node_modules/.bin/next", "dev"],
+      "env": { "PATH": "/usr/local/bin:/usr/bin:/bin" },
       "port": 3001,
       "autoPort": true
     }

@@ -66,13 +66,20 @@ interface KelingResultResponse {
 export async function submitImageGeneration(params: KelingGenerateRequest): Promise<string> {
   const token = generateJWT();
 
+  const isOmni = !params.model_name || params.model_name === 'kling-image-o1';
+  const endpoint = isOmni ? '/v1/images/omni-image' : '/v1/images/generations';
+
   const body: Record<string, any> = {
     model_name: params.model_name || 'kling-image-o1',
     prompt: params.prompt,
     n: 1,
     aspect_ratio: params.aspect_ratio || '16:9',
-    image_fidelity: params.image_fidelity || 'normal',
   };
+
+  // Only omni-image endpoint supports image_fidelity
+  if (isOmni) {
+    body.image_fidelity = params.image_fidelity || 'normal';
+  }
 
   if (params.negative_prompt) {
     body.negative_prompt = params.negative_prompt;
@@ -82,7 +89,7 @@ export async function submitImageGeneration(params: KelingGenerateRequest): Prom
     body.image_list = params.image_list;
   }
 
-  const response = await fetch(`${KELING_BASE_URL}/v1/images/omni-image`, {
+  const response = await fetch(`${KELING_BASE_URL}${endpoint}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -100,13 +107,14 @@ export async function submitImageGeneration(params: KelingGenerateRequest): Prom
   return result.data.task_id;
 }
 
-export async function queryImageResult(taskId: string): Promise<{
+export async function queryImageResult(taskId: string, endpoint?: string): Promise<{
   status: string;
   imageUrl?: string;
 }> {
   const token = generateJWT();
+  const queryEndpoint = endpoint || '/v1/images/omni-image';
 
-  const response = await fetch(`${KELING_BASE_URL}/v1/images/omni-image/${taskId}`, {
+  const response = await fetch(`${KELING_BASE_URL}${queryEndpoint}/${taskId}`, {
     headers: {
       'Authorization': `Bearer ${token}`,
     },
@@ -128,13 +136,13 @@ export async function queryImageResult(taskId: string): Promise<{
 
 export async function pollImageResult(
   taskId: string,
-  opts?: { maxAttempts?: number; initialDelay?: number },
+  opts?: { maxAttempts?: number; initialDelay?: number; endpoint?: string },
 ): Promise<{ status: string; imageUrl?: string }> {
   const maxAttempts = opts?.maxAttempts || 15;
   let delay = opts?.initialDelay || 2000;
   for (let i = 0; i < maxAttempts; i++) {
     await new Promise((r) => setTimeout(r, delay));
-    const result = await queryImageResult(taskId);
+    const result = await queryImageResult(taskId, opts?.endpoint);
     if (result.status === 'completed' && result.imageUrl) return result;
     if (result.status === 'failed') return result;
     delay = Math.min(delay * 1.3, 5000);

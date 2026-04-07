@@ -23,6 +23,7 @@ interface PlayerState {
   setCurrentNode: (node: StoryNode) => void;
   addGeneratedNodes: (nodes: StoryNode[]) => void;
   updateGeneratedNode: (nodeId: string, data: Partial<StoryNode['data']>) => void;
+  updateFrameImage: (nodeId: string, frameId: string, imageUrl: string) => void;
   addGeneratedBranch: (branch: UserGeneratedBranch) => void;
   findMatchingBranch: (parentNodeId: string, playerInput: string) => UserGeneratedBranch | null;
 }
@@ -199,20 +200,37 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
     set(updates);
   },
 
+  updateFrameImage: (nodeId, frameId, imageUrl) => {
+    const { story, currentNode } = get();
+    if (!story) return;
+    const updateFrames = (frames: any[]) =>
+      frames.map((f: any) => f.id === frameId ? { ...f, imageUrl } : f);
+    const updates: Record<string, any> = {
+      story: {
+        ...story,
+        nodes: (story.nodes || []).map((n) =>
+          n.id === nodeId ? { ...n, data: { ...n.data, frames: updateFrames(n.data.frames || []) } } : n
+        ),
+      },
+    };
+    if (currentNode?.id === nodeId) {
+      updates.currentNode = { ...currentNode, data: { ...currentNode.data, frames: updateFrames(currentNode.data.frames || []) } };
+    }
+    set(updates);
+  },
+
   addGeneratedBranch: (branch) => {
     set((s) => ({ generatedBranches: [...s.generatedBranches, branch] }));
   },
 
   findMatchingBranch: (parentNodeId, playerInput) => {
     const { generatedBranches } = get();
-    const input = playerInput.toLowerCase().trim();
+    // Normalize: lowercase, remove punctuation/spaces
+    const normalize = (s: string) => s.toLowerCase().replace(/[\s\p{P}]/gu, '');
+    const input = normalize(playerInput);
     return generatedBranches.find((b) => {
       if (b.parentNodeId !== parentNodeId) return false;
-      const cached = b.playerInput.toLowerCase().trim();
-      // Character overlap > 70%
-      const inputChars = [...input];
-      const matchCount = inputChars.filter((ch) => cached.includes(ch)).length;
-      return matchCount / Math.max(inputChars.length, 1) > 0.7;
+      return normalize(b.playerInput) === input;
     }) || null;
   },
 }), {

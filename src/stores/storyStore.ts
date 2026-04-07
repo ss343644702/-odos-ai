@@ -25,6 +25,7 @@ interface StoryState {
   setStyle: (style: StyleConfig) => void;
   setWorldView: (worldView: string) => void;
   setPlayerObjective: (objective: import('@/types/story').PlayerObjective | null) => void;
+  setEntities: (entities: import('@/types/story').EntityCollection | null) => void;
   updateSettings: (updates: Partial<Story['settings']>) => void;
 
   // Node operations
@@ -93,6 +94,7 @@ export const useStoryStore = create<StoryState>()(persist((set, get) => ({
       worldView: '',
       style: null,
       playerObjective: null,
+      entities: null,
     };
     set({ story, past: [], future: [] });
   },
@@ -136,6 +138,12 @@ export const useStoryStore = create<StoryState>()(persist((set, get) => ({
     const { story } = get();
     if (!story) return;
     set({ story: { ...story, playerObjective: objective, updatedAt: new Date().toISOString() } });
+  },
+
+  setEntities: (entities) => {
+    const { story } = get();
+    if (!story) return;
+    set({ story: { ...story, entities, updatedAt: new Date().toISOString() } });
   },
 
   updateSettings: (updates) => {

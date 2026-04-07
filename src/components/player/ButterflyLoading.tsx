@@ -26,7 +26,7 @@ const BUTTERFLY_MESSAGES = [
   '微小扰动造成显著气象差异…',
 ];
 
-export default function ButterflyLoading() {
+export default function ButterflyLoading({ prefix }: { prefix?: string }) {
   const [index, setIndex] = useState(0);
 
   useEffect(() => {
@@ -37,15 +37,20 @@ export default function ButterflyLoading() {
   }, []);
 
   return (
-    <div className="flex-1 flex items-center gap-2 px-4 py-3">
-      <span className="animate-spin text-xs" style={{ color: 'var(--accent)' }}>⟳</span>
-      <span
-        className="text-sm transition-opacity duration-500"
-        style={{ color: 'var(--accent)' }}
-        key={index}
-      >
-        {BUTTERFLY_MESSAGES[index]}
-      </span>
+    <div className="flex-1 px-4 py-3">
+      {prefix && (
+        <p className="text-sm mb-1 truncate" style={{ color: 'var(--text-primary)' }}>{prefix}</p>
+      )}
+      <div className="flex items-center gap-2">
+        <span className="animate-spin text-xs" style={{ color: 'var(--accent)' }}>⟳</span>
+        <span
+          className="text-xs transition-opacity duration-500"
+          style={{ color: 'var(--accent)' }}
+          key={index}
+        >
+          {BUTTERFLY_MESSAGES[index]}
+        </span>
+      </div>
     </div>
   );
 }

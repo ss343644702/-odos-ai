@@ -21,6 +21,17 @@ function isStubNode(node: any): boolean {
   return !hasNarration && !hasVoice;
 }
 
+/** Check if a node has core content ready (narration + voice). Images are optional — don't block navigation. */
+function isNodeReady(node: any): boolean {
+  if (!node) return false;
+  // Mainline authored nodes are always ready
+  if (node.type !== 'ai_generated' && node.type !== 'ending') return true;
+  if (!node.data?.narration) return false;
+  if (!(node.data?.voiceSegments?.length > 0)) return false;
+  // Images are NOT required to navigate — they enhance but don't block
+  return true;
+}
+
 export default function GameplayView({ isPreview = false }: { isPreview?: boolean }) {
   const router = useRouter();
   const currentNode = usePlayerStore((s) => s.currentNode);
@@ -35,6 +46,10 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
   const [narrationDone, setNarrationDone] = useState(false);
   const [currentSegmentIndex, setCurrentSegmentIndex] = useState(0);
   const [waitingForNode, setWaitingForNode] = useState(false);
+  const [waitingChoiceText, setWaitingChoiceText] = useState('');
+  const [isMuted, setIsMuted] = useState(false);
+  const waitingPollRef = useRef<ReturnType<typeof setInterval>>(undefined);
+  const waitingTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const typewriterRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const narrationRef = useRef<NarrationPlayerHandle>(null);
 
@@ -61,23 +76,33 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
     ? (voiceSegments[currentSegmentIndex]?.text || '')
     : (currentNode?.data.narration || '');
 
-  // Reset state when node changes (use history length to detect circular navigation A→B→A)
-  const historyLen = session?.history?.length ?? 0;
+  // Navigation counter — increments on every node transition (handles circular A→B→A)
+  // Reset state synchronously during render to avoid flash of stale content
+  const navCountRef = useRef(0);
+  const prevNodeIdRef = useRef(currentNode?.id);
+  if (currentNode?.id !== prevNodeIdRef.current) {
+    navCountRef.current++;
+    prevNodeIdRef.current = currentNode?.id;
+    // Synchronous reset — prevents flash of old segment before useEffect fires
+    currentSegmentIndex !== 0 && setCurrentSegmentIndex(0);
+    displayedText !== '' && setDisplayedText('');
+    isTyping && setIsTyping(false);
+    waitingForNode && setWaitingForNode(false);
+  }
+  const navCount = navCountRef.current;
+
+  // Additional reset effects that need to run after render (narration/voice detection)
   useEffect(() => {
-    setCurrentSegmentIndex(0);
-    setDisplayedText('');
-    setIsTyping(false);
-    setWaitingForNode(false);
     const hasVoice = (currentNode?.data.voiceSegments?.length ?? 0) > 0;
     const hasNarration = !!(currentNode?.data.narration);
     setNarrationDone(!hasVoice);
-    // If no narration and no voice, show choices immediately
     if (!hasNarration && !hasVoice) {
       setShowChoices(true);
     } else {
       setShowChoices(false);
     }
-  }, [currentNode?.id, historyLen]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navCount]);
 
   // Typewriter effect
   useEffect(() => {
@@ -100,17 +125,24 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
 
   const handleSegmentChange = useCallback((segIndex: number) => {
     setCurrentSegmentIndex(segIndex);
-  }, []);
+    // Hide choices when playback moves to a non-last segment (e.g. replaying from start)
+    if (segIndex < (voiceSegments.length - 1)) {
+      setShowChoices(false);
+    }
+  }, [voiceSegments.length]);
 
   const handleNarrationEnd = useCallback(() => {
     setNarrationDone(true);
   }, []);
 
-  // Show choices when narration is done and typewriter finished
+  // Show choices only when narration is done, typewriter finished, AND we're on the last segment
   useEffect(() => {
     if (isTyping || !narrationDone) return;
-    setShowChoices(true);
-  }, [isTyping, narrationDone]);
+    const isLastSegment = voiceSegments.length === 0 || currentSegmentIndex >= voiceSegments.length - 1;
+    if (isLastSegment) {
+      setShowChoices(true);
+    }
+  }, [isTyping, narrationDone, currentSegmentIndex, voiceSegments.length]);
 
   // Skip / advance
   const handleTap = useCallback(() => {
@@ -173,6 +205,14 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
     return false;
   }, []);
 
+  // Cancel all in-flight generation (polling, prefetch, etc.)
+  const cancelAllGeneration = useCallback(() => {
+    if (waitingPollRef.current) { clearInterval(waitingPollRef.current); waitingPollRef.current = undefined; }
+    if (waitingTimerRef.current) { clearTimeout(waitingTimerRef.current); waitingTimerRef.current = undefined; }
+    setWaitingForNode(false);
+    usePlayerStore.getState().setBranching(false);
+  }, []);
+
   // Handle choice selection — check if target is a stub, wait if needed
   const handleChoose = useCallback((choiceId: string) => {
     const state = usePlayerStore.getState();
@@ -185,25 +225,29 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
     const targetNodeId = choice.targetNodeId;
     const targetNode = state.story?.nodes?.find((n) => n.id === targetNodeId);
 
-    // If target node has full content, navigate immediately
-    if (targetNode && !isStubNode(targetNode)) {
+    // If target node has ALL content ready (narration + voice + images), navigate immediately
+    if (targetNode && isNodeReady(targetNode)) {
       navigateToNode(targetNodeId, choice.text);
       return;
     }
 
-    // Target doesn't exist or is a stub — show loading and poll
+    // Target not fully ready — show ButterflyLoading and poll until complete
     setWaitingForNode(true);
+    setWaitingChoiceText(choice.text || '');
     let onDemandStarted = false;
 
     const poll = setInterval(() => {
       const fresh = usePlayerStore.getState().story?.nodes?.find((n) => n.id === targetNodeId);
-      if (fresh && !isStubNode(fresh)) {
+      if (fresh && isNodeReady(fresh)) {
         clearInterval(poll);
         clearTimeout(onDemandTimer);
         setWaitingForNode(false);
+        waitingPollRef.current = undefined;
+        waitingTimerRef.current = undefined;
         usePlayerStore.getState().navigateToNode(targetNodeId, choice.text);
       }
     }, 500);
+    waitingPollRef.current = poll;
 
     // After 15s, start on-demand generation if still waiting
     const onDemandTimer = setTimeout(async () => {
@@ -212,7 +256,7 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
       const ok = await generateOnDemand(targetNodeId);
       // After on-demand completes, check again
       const fresh = usePlayerStore.getState().story?.nodes?.find((n) => n.id === targetNodeId);
-      if (fresh && !isStubNode(fresh)) {
+      if (fresh && isNodeReady(fresh)) {
         clearInterval(poll);
         setWaitingForNode(false);
         usePlayerStore.getState().navigateToNode(targetNodeId, choice.text);
@@ -220,6 +264,7 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
         // All retries failed — keep polling, on-demand already tried
       }
     }, 15000);
+    waitingTimerRef.current = onDemandTimer;
   }, [navigateToNode, generateOnDemand]);
 
   if (!currentNode || !story) {
@@ -250,7 +295,7 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
       <div className="flex items-center gap-2 px-3 py-3">
         {!isPreview && (
           <button
-            onClick={() => router.push('/discover')}
+            onClick={() => { cancelAllGeneration(); router.push('/discover'); }}
             className="p-1.5 rounded-full transition-colors"
             style={{ color: 'var(--text-secondary)' }}
             title="返回主页"
@@ -262,12 +307,33 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
         )}
         <span className="text-sm font-medium flex-1 truncate" style={{ color: 'var(--text-primary)' }}>{story.title}</span>
         {session && session.history.length > 0 && (
-          <button onClick={goBack} className="p-1.5 rounded-full" style={{ color: 'var(--text-secondary)' }} title="撤回上一步">
+          <button onClick={() => { cancelAllGeneration(); goBack(); }} className="p-1.5 rounded-full" style={{ color: 'var(--text-secondary)' }} title="撤回上一步">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M9 14L4 9l5-5" /><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" />
             </svg>
           </button>
         )}
+        <button
+          onClick={() => {
+            narrationRef.current?.toggleMute();
+            setIsMuted((m) => !m);
+          }}
+          className="p-1.5 rounded-full"
+          style={{ color: isMuted ? 'var(--danger)' : 'var(--text-secondary)' }}
+          title={isMuted ? '取消静音' : '静音'}
+        >
+          {isMuted ? (
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+              <line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" />
+            </svg>
+          ) : (
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+              <path d="M19.07 4.93a10 10 0 0 1 0 14.14" /><path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+            </svg>
+          )}
+        </button>
       </div>
 
       {/* Story image */}
@@ -288,7 +354,17 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
             {voiceSegments.map((_, i) => (
               <span
                 key={i}
-                className="w-2 h-2 rounded-full transition-all"
+                onClick={() => {
+                  setCurrentSegmentIndex(i);
+                  setDisplayedText(voiceSegments[i]?.text || '');
+                  setIsTyping(false);
+                  // Hide choices when switching to non-last segment
+                  if (i < voiceSegments.length - 1) {
+                    setShowChoices(false);
+                  }
+                  narrationRef.current?.playFromSegment(i);
+                }}
+                className="w-2 h-2 rounded-full transition-all cursor-pointer"
                 style={{
                   background: i === currentSegmentIndex ? 'white' : 'rgba(255,255,255,0.4)',
                   transform: i === currentSegmentIndex ? 'scale(1.3)' : 'scale(1)',
@@ -376,7 +452,7 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
               className="rounded-xl overflow-hidden"
               style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border)' }}
             >
-              <ButterflyLoading />
+              <ButterflyLoading prefix={waitingChoiceText} />
             </div>
           ) : (
             <>
