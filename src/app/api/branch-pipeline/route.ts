@@ -78,6 +78,7 @@ const BRANCH_DECISION_PROMPT = `你是一个互动影游的实时剧情推理引
 - **后半段**: 描述这个行为带来的后果和新的情境
 - 要有画面感和戏剧张力，不能只是平淡过渡
 - **禁止**直接叙述"你回到了主线/原来的剧情"这类 meta 描述
+- **严禁引用玩家尚未遇到的角色或事件**。只能提及当前场景和"近期剧情经历"中出现过的角色。主线剧情结构仅供选择 convergenceNodeId，不得在叙述中剧透
 
 ## choices 要求
 - 生成**恰好 2 个选项**，每个都要有具体的动作描述
@@ -205,6 +206,7 @@ export async function POST(request: NextRequest) {
         `2. 恰好生成 2 个选项：1个 branch + 1个 converge`,
         `3. **convergenceNodeId = 收束到该节点的开头**：选一个主线节点，确保支线结尾能自然接上该节点narration的第一句话。converge_narration 描述如何过渡到该节点的开头情境`,
         `4. **结局判断基于玩家目标**：只有当目标彻底失败/达成/被放弃时才触发结局，优先匹配已有结局`,
+        `5. **严禁引用玩家尚未遇到的角色或事件**。narration 和选项中只能出现：当前场景中的角色、玩家此前经历中提到的角色。主线剧情结构仅用于选择 convergenceNodeId，不要在叙述中剧透后续剧情`,
       ].filter(Boolean).join('\n'),
       temperature: 0.6,
       maxTokens: 2048,
