@@ -78,15 +78,15 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
   // Navigation counter — increments on every node transition (handles circular A→B→A)
   // Reset state synchronously during render to avoid flash of stale content
   const navCountRef = useRef(0);
-  const prevNodeIdRef = useRef(currentNode?.id);
+  const prevNodeIdRef = useRef<string | undefined>(undefined); // Start as undefined so first render triggers reset
   if (currentNode?.id !== prevNodeIdRef.current) {
     navCountRef.current++;
     prevNodeIdRef.current = currentNode?.id;
     // Synchronous reset — prevents flash of old segment before useEffect fires
-    currentSegmentIndex !== 0 && setCurrentSegmentIndex(0);
-    displayedText !== '' && setDisplayedText('');
-    isTyping && setIsTyping(false);
-    waitingForNode && setWaitingForNode(false);
+    if (currentSegmentIndex !== 0) setCurrentSegmentIndex(0);
+    if (displayedText !== '') setDisplayedText('');
+    if (isTyping) setIsTyping(false);
+    if (waitingForNode) setWaitingForNode(false);
   }
   const navCount = navCountRef.current;
 
