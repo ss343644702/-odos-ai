@@ -82,7 +82,18 @@ export const useStoryStore = create<StoryState>()(persist((set, get) => ({
       status: 'draft',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-      nodes: [],
+      nodes: [{
+        id: 'story-config',
+        type: 'story_config' as const,
+        position: { x: 0, y: 0 },
+        data: {
+          title, narration: '', dialogue: null, character: null,
+          imageUrl: null, imagePrompt: '', audioUrl: null,
+          choices: [], allowCustomInput: false, depth: -1,
+          voiceSegments: [], frames: [],
+          metadata: { tags: [], storyContext: '' },
+        },
+      }],
       edges: [],
       settings: {
         defaultVoice: 'narrator',

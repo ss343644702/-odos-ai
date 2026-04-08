@@ -65,6 +65,14 @@ function storyEdgeToFlow(edge: StoryEdge, storyNodes?: StoryNode[]): Edge {
     }
   }
 
+  // Check if this edge connects from a hidden/best choice
+  let isHiddenChoice = false;
+  if (storyNodes && resolvedHandle) {
+    const srcNode = storyNodes.find((n) => n.id === edge.source);
+    const srcChoice = srcNode?.data.choices?.find((c) => c.id === resolvedHandle);
+    isHiddenChoice = srcChoice?.visibility === 'hidden';
+  }
+
   return {
     id: edge.id,
     source: edge.source,
@@ -73,10 +81,11 @@ function storyEdgeToFlow(edge: StoryEdge, storyNodes?: StoryNode[]): Edge {
     targetHandle: undefined,
     label: resolvedLabel.length > 15 ? resolvedLabel.slice(0, 15) + '…' : resolvedLabel,
     type: 'smoothstep',
-    animated: edge.type === 'ai_generated',
+    animated: isHiddenChoice || edge.type === 'ai_generated',
     style: {
-      stroke: edge.type === 'ai_generated' ? 'var(--node-ai)' : 'var(--text-muted)',
+      stroke: isHiddenChoice ? 'var(--accent)' : edge.type === 'ai_generated' ? 'var(--node-ai)' : 'var(--text-muted)',
       strokeWidth: 2,
+      ...(isHiddenChoice ? { strokeDasharray: '6 3' } : {}),
     },
     labelStyle: {
       fill: 'var(--text-secondary)',
@@ -129,8 +138,10 @@ function StoryCanvasInner() {
   // Wrap change handlers to sync deletions to Zustand store
   const onNodesChange = useCallback(
     (changes: any[]) => {
-      onNodesChangeBase(changes);
-      for (const change of changes) {
+      // Filter out deletion of story-config node
+      const filtered = changes.filter((c: any) => !(c.type === 'remove' && c.id === 'story-config'));
+      onNodesChangeBase(filtered);
+      for (const change of filtered) {
         if (change.type === 'remove') {
           storeRemoveNode(change.id);
         }

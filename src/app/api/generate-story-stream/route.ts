@@ -132,7 +132,7 @@ ${JSON.stringify(input.existingOutline, null, 2)}
           systemPrompt,
           userMessage,
           temperature: (skill === 'branchGenerator' || skill === 'branchComplete' || skill === 'expandNode' || skill === 'branchMainline' || skill === 'branchSubline') ? 0.85 : 0.7,
-          maxTokens: (skill === 'branchGenerator' || skill === 'branchComplete' || skill === 'outlineGenerator' || skill === 'editOutline' || skill === 'branchMainline') ? 8192 : (skill === 'chat' ? 2048 : 4096),
+          maxTokens: (skill === 'branchGenerator' || skill === 'branchComplete' || skill === 'outlineGenerator' || skill === 'editOutline' || skill === 'branchMainline' || skill === 'branchSubline') ? 16384 : (skill === 'chat' ? 2048 : 4096),
           jsonMode: skill !== 'chat',
           onChunk(text) {
             fullText += text;

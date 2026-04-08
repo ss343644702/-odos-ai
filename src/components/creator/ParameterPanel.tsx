@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useStoryStore } from '@/stores/storyStore';
 import { useChatStore } from '@/stores/chatStore';
 import StoryConfigPanel from './StoryConfigPanel';
@@ -48,6 +49,7 @@ export default function ParameterPanel() {
   const [generatingFrameId, setGeneratingFrameId] = useState<string | null>(null);
   const [frameProgress, setFrameProgress] = useState('');
   const [activeFrameTab, setActiveFrameTab] = useState(0);
+  const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   const [isBatchGenerating, setIsBatchGenerating] = useState(false);
   const [batchProgress, setBatchProgress] = useState('');
 
@@ -318,7 +320,11 @@ export default function ParameterPanel() {
                 {/* Image area */}
                 {frame.imageUrl ? (
                   <div className="relative">
-                    <img src={frame.imageUrl} alt="" className="w-full aspect-video object-cover" />
+                    <img
+                      src={frame.imageUrl} alt=""
+                      className="w-full aspect-video object-cover cursor-pointer"
+                      onClick={() => setLightboxImage(frame.imageUrl)}
+                    />
                     <button
                       onClick={() => handleGenerateFrameImage(frame)}
                       disabled={generatingFrameId !== null || isBatchGenerating}
@@ -573,6 +579,20 @@ export default function ParameterPanel() {
                       </span>
                     )}
                   </div>
+                  <button
+                    onClick={() => {
+                      const next = choice.visibility === 'hidden' ? 'visible' : 'hidden';
+                      updateChoice(node.id, choice.id, { visibility: next });
+                    }}
+                    className="text-[9px] px-1.5 py-0.5 rounded flex-shrink-0"
+                    style={{
+                      background: choice.visibility === 'hidden' ? 'rgba(255,170,0,0.15)' : 'var(--bg-primary)',
+                      color: choice.visibility === 'hidden' ? '#ffa500' : 'var(--text-muted)',
+                    }}
+                    title={choice.visibility === 'hidden' ? '隐藏选项：游玩时不可见，需自由输入触发' : '可见选项：点击切换为隐藏'}
+                  >
+                    {choice.visibility === 'hidden' ? '🔒' : '👁'}
+                  </button>
                   <button onClick={() => removeChoice(node.id, choice.id)} className="p-0.5 rounded flex-shrink-0" style={{ color: 'var(--text-muted)' }}>
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
@@ -629,15 +649,47 @@ export default function ParameterPanel() {
           </SectionBlock>
         )}
 
-        {/* ─── Danger Zone ─── */}
-        <button
-          onClick={() => { removeNode(node.id); handleClose(); }}
-          className="w-full py-2 rounded-lg text-[11px] transition-colors"
-          style={{ color: 'var(--danger)', border: '1px solid var(--danger)', background: 'transparent', opacity: 0.7 }}
-        >
-          删除节点
-        </button>
+        {/* ─── Danger Zone (not for story-config) ─── */}
+        {node.id !== 'story-config' && (
+          <button
+            onClick={() => { removeNode(node.id); handleClose(); }}
+            className="w-full py-2 rounded-lg text-[11px] transition-colors"
+            style={{ color: 'var(--danger)', border: '1px solid var(--danger)', background: 'transparent', opacity: 0.7 }}
+          >
+            删除节点
+          </button>
+        )}
       </div>
+
+      {/* Lightbox for frame images */}
+      {lightboxImage && typeof document !== 'undefined' && createPortal(
+        <div
+          className="fixed inset-0 z-[200] flex items-center justify-center"
+          style={{ background: 'rgba(0,0,0,0.9)', backdropFilter: 'blur(8px)' }}
+          onClick={() => setLightboxImage(null)}
+        >
+          <button
+            className="absolute top-5 right-5 p-2.5 rounded-full transition-colors hover:bg-white/20"
+            style={{ color: 'white' }}
+            onClick={() => setLightboxImage(null)}
+          >
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+          <img
+            src={lightboxImage}
+            alt=""
+            className="max-w-[92vw] max-h-[88vh] object-contain rounded-xl"
+            style={{ boxShadow: '0 25px 80px rgba(0,0,0,0.6)' }}
+            onClick={(e) => e.stopPropagation()}
+          />
+          <p className="absolute bottom-5 text-xs" style={{ color: 'rgba(255,255,255,0.4)' }}>
+            点击空白处关闭
+          </p>
+        </div>,
+        document.body,
+      )}
     </div>
   );
 }

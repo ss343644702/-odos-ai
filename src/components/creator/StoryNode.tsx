@@ -195,6 +195,12 @@ function StoryNodeComponent({ data, selected }: StoryNodeProps) {
             </div>
           )}
 
+          {data.choices?.some((c: any) => c.visibility === 'hidden') && (
+            <div className="flex items-center gap-1 mt-1 text-[10px]" style={{ color: '#ffa500' }}>
+              🔒 {data.choices.filter((c: any) => c.visibility === 'hidden').length}个隐藏选项
+            </div>
+          )}
+
           {data.allowCustomInput && (
             <div
               className="flex items-center gap-1 mt-1 text-[10px]"

@@ -1,10 +1,12 @@
 'use client';
 
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useChatStore } from '@/stores/chatStore';
 import { useEditorStore } from '@/stores/editorStore';
 import { useStoryStore } from '@/stores/storyStore';
 import type { VoiceType } from '@/types/story';
+import { PRESET_STYLES } from '@/lib/agent/types';
 
 const voiceTypeLabels: Record<VoiceType, string> = {
   narrator: '旁白（中性沉稳）',
@@ -231,25 +233,134 @@ export default function StoryConfigPanel() {
         </button>
       </div>
 
-      {/* 1. Style (readonly) */}
+      {/* 0. Basic Info — editable */}
+      <Section title="基本信息" icon="📝" defaultOpen={true}>
+        <div className="px-4 pb-3 space-y-2">
+          <div>
+            <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>描述</span>
+            <textarea
+              value={story?.description || ''}
+              onChange={(e) => { if (story) useStoryStore.getState().setStory({ ...story, description: e.target.value, updatedAt: new Date().toISOString() }); }}
+              rows={2}
+              className="w-full px-2.5 py-1.5 rounded-lg text-xs resize-none mt-1"
+              style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+              placeholder="故事简介..."
+            />
+          </div>
+          <div>
+            <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>世界观</span>
+            <textarea
+              value={story?.worldView || ''}
+              onChange={(e) => { if (story) useStoryStore.getState().setWorldView(e.target.value); }}
+              rows={3}
+              className="w-full px-2.5 py-1.5 rounded-lg text-xs resize-none mt-1"
+              style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+              placeholder="世界观设定..."
+            />
+          </div>
+        </div>
+      </Section>
+
+      {/* 0.5 Player Objective — editable */}
+      <Section title="玩家目标" icon="🎯">
+        <div className="px-4 pb-3 space-y-2">
+          <div>
+            <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>主要目标</span>
+            <input
+              value={story?.playerObjective?.primary || ''}
+              onChange={(e) => {
+                const obj = story?.playerObjective || { primary: '', hidden: '', measurement: '' };
+                useStoryStore.getState().setPlayerObjective({ ...obj, primary: e.target.value });
+              }}
+              className="w-full px-2.5 py-1.5 rounded-lg text-xs mt-1"
+              style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+              placeholder="玩家从一开始就知道的目标"
+            />
+          </div>
+          <div>
+            <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>隐藏真相</span>
+            <input
+              value={story?.playerObjective?.hidden || ''}
+              onChange={(e) => {
+                const obj = story?.playerObjective || { primary: '', hidden: '', measurement: '' };
+                useStoryStore.getState().setPlayerObjective({ ...obj, hidden: e.target.value });
+              }}
+              className="w-full px-2.5 py-1.5 rounded-lg text-xs mt-1"
+              style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+              placeholder="玩家不知道的深层真相"
+            />
+          </div>
+          <div>
+            <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>衡量维度</span>
+            <input
+              value={story?.playerObjective?.measurement || ''}
+              onChange={(e) => {
+                const obj = story?.playerObjective || { primary: '', hidden: '', measurement: '' };
+                useStoryStore.getState().setPlayerObjective({ ...obj, measurement: e.target.value });
+              }}
+              className="w-full px-2.5 py-1.5 rounded-lg text-xs mt-1"
+              style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+              placeholder="目标达成的衡量维度"
+            />
+          </div>
+        </div>
+      </Section>
+
+      {/* 0.8 Settings — editable */}
+      <Section title="故事设置" icon="⚙️">
+        <div className="px-4 pb-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>最大深度</span>
+            <input
+              type="number"
+              value={story?.settings?.maxDepth || 10}
+              onChange={(e) => updateSettings({ maxDepth: parseInt(e.target.value) || 10 })}
+              min={3} max={15}
+              className="w-16 px-2 py-1 rounded text-xs text-right"
+              style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+            />
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>结局数量</span>
+            <input
+              type="number"
+              value={story?.settings?.endingCount || 3}
+              onChange={(e) => updateSettings({ endingCount: parseInt(e.target.value) || 3 })}
+              min={1} max={8}
+              className="w-16 px-2 py-1 rounded text-xs text-right"
+              style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+            />
+          </div>
+        </div>
+      </Section>
+
+      {/* 1. Style — with selector */}
       <Section title="画面风格" icon="🎨" defaultOpen={true}>
-        {style ? (
-          <>
-            <div
-              className="px-3 py-2 rounded-lg mb-2 text-sm font-medium"
-              style={{ background: 'var(--accent-dim)', color: 'var(--accent)' }}
-            >
-              {style.styleName}
-            </div>
-            <ReadonlyField label="色调" value={style.colorTone} />
-            <ReadonlyField label="光影" value={style.lightingStyle} />
-            <p className="text-[10px] leading-relaxed break-all" style={{ color: 'var(--text-muted)' }}>
-              {style.stylePromptPrefix}
-            </p>
-          </>
-        ) : (
-          <p className="text-xs" style={{ color: 'var(--text-muted)' }}>尚未选择风格</p>
-        )}
+        <div className="px-4 pb-3">
+          <select
+            value={style?.styleId || ''}
+            onChange={(e) => {
+              const selected = PRESET_STYLES.find(s => s.styleId === e.target.value);
+              if (selected) useStoryStore.getState().setStyle(selected);
+            }}
+            className="w-full px-2.5 py-1.5 rounded-lg text-xs mb-2"
+            style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+          >
+            <option value="">选择风格...</option>
+            {PRESET_STYLES.map(s => (
+              <option key={s.styleId} value={s.styleId}>{s.styleName}</option>
+            ))}
+          </select>
+          {style && (
+            <>
+              <ReadonlyField label="色调" value={style.colorTone} />
+              <ReadonlyField label="光影" value={style.lightingStyle} />
+              <p className="text-[10px] leading-relaxed break-all" style={{ color: 'var(--text-muted)' }}>
+                {style.stylePromptPrefix}
+              </p>
+            </>
+          )}
+        </div>
       </Section>
 
       {/* 2. Outline (readonly) */}
@@ -476,29 +587,36 @@ export default function StoryConfigPanel() {
       </Section>
 
       {/* Image Lightbox */}
-      {lightboxImage && (
+      {lightboxImage && typeof document !== 'undefined' && createPortal(
         <div
-          className="fixed inset-0 z-[100] flex items-center justify-center"
-          style={{ background: 'rgba(0,0,0,0.85)' }}
+          className="fixed inset-0 z-[200] flex items-center justify-center"
+          style={{ background: 'rgba(0,0,0,0.9)', backdropFilter: 'blur(8px)' }}
           onClick={() => setLightboxImage(null)}
         >
+          {/* Close button */}
           <button
-            className="absolute top-4 right-4 p-2 rounded-full"
-            style={{ background: 'rgba(255,255,255,0.1)', color: 'white' }}
+            className="absolute top-5 right-5 p-2.5 rounded-full transition-colors hover:bg-white/20"
+            style={{ color: 'white' }}
             onClick={() => setLightboxImage(null)}
           >
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
             </svg>
           </button>
+          {/* Image */}
           <img
             src={lightboxImage}
             alt=""
-            className="max-w-[90vw] max-h-[85vh] object-contain rounded-lg"
-            style={{ boxShadow: '0 20px 60px rgba(0,0,0,0.5)' }}
+            className="max-w-[92vw] max-h-[88vh] object-contain rounded-xl"
+            style={{ boxShadow: '0 25px 80px rgba(0,0,0,0.6)' }}
             onClick={(e) => e.stopPropagation()}
           />
-        </div>
+          {/* Hint */}
+          <p className="absolute bottom-5 text-xs" style={{ color: 'rgba(255,255,255,0.4)' }}>
+            点击空白处关闭
+          </p>
+        </div>,
+        document.body,
       )}
     </div>
   );

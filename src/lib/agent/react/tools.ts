@@ -174,6 +174,7 @@ const generateOutline: ToolExecutor = async (input, ctx) => {
     `\n👥 角色（${outline.characters?.length || 0}）：\n  ${charSummary}`,
     plotSummary ? `\n📋 情节脉络（${decisionCount}个决策点）：\n${plotSummary}` : '',
     endingSummary ? `\n🏁 结局方向（${outline.endings?.length || 0}）：\n${endingSummary}` : '',
+    `\n🔒 可设置隐藏路线（游玩时不可见，需自由输入触发）`,
   ].filter(Boolean).join('\n');
 
   return {
@@ -428,6 +429,18 @@ const generateBranches: ToolExecutor = async (_input, ctx) => {
   const outlineDepth = Math.min(Math.max(outline.depth || 7, 7), 10);
   const repairs: string[] = [];
 
+  // If agent specified a hidden ending, mark it in the outline before generation
+  const hiddenEndingTitle = (_input as any)?.hiddenEndingTitle;
+  if (hiddenEndingTitle && outline.endings) {
+    const targetEnding = outline.endings.find((e: any) =>
+      e.title === hiddenEndingTitle || e.title?.includes(hiddenEndingTitle) || hiddenEndingTitle.includes(e.title)
+    );
+    if (targetEnding) {
+      (targetEnding as any).type = 'hidden';
+      repairs.push(`🔒 已将结局「${targetEnding.title}」标记为隐藏`);
+    }
+  }
+
   // ============================================================
   // Phase 1: Generate mainline (linear story, depth 0 → max)
   // ============================================================
@@ -617,6 +630,53 @@ const generateBranches: ToolExecutor = async (_input, ctx) => {
   }
 
   // ============================================================
+  // Phase 3.5: Mark hidden choices (for endings marked as 'hidden' in outline)
+  // ============================================================
+  const hiddenEndings = (outline.endings || []).filter((e: any) => e.type === 'hidden');
+  const hiddenEndingTitles = hiddenEndings.map((e: any) => e.title?.toLowerCase());
+
+  if (hiddenEndingTitles.length > 0) {
+    // Find ending nodes matching hidden endings from outline (fuzzy title match)
+    const hiddenEndingNodeIds = new Set<string>();
+    for (const node of allNodes) {
+      if (node.type === 'ending') {
+        const titleLower = node.data.title?.toLowerCase() || '';
+        const isMatch = hiddenEndingTitles.some((t: string) =>
+          titleLower.includes(t) || t.includes(titleLower) ||
+          // Also match by keyword overlap (at least 2 shared characters for short titles)
+          [...t].filter(ch => titleLower.includes(ch)).length >= Math.min(t.length * 0.5, 3)
+        );
+        if (isMatch) {
+          hiddenEndingNodeIds.add(node.id);
+          node.data.metadata = { ...node.data.metadata, endingType: 'hidden' as any, tags: [...(node.data.metadata?.tags || []), 'hidden_ending'] };
+          repairs.push(`🔒 标记隐藏结局节点：「${node.data.title}」`);
+        }
+      }
+    }
+
+    // Find choices that lead to hidden endings (directly or via parent nodes leading only to hidden endings)
+    if (hiddenEndingNodeIds.size > 0) {
+      for (const node of allNodes) {
+        for (const choice of node.data.choices || []) {
+          if (hiddenEndingNodeIds.has(choice.targetNodeId)) {
+            choice.visibility = 'hidden' as any;
+            repairs.push(`🔒 隐藏选项：「${choice.text}」→ ${choice.targetNodeId}`);
+          }
+          // Also check if target node's only path leads to a hidden ending
+          const targetNode = allNodes.find(n => n.id === choice.targetNodeId);
+          if (targetNode && targetNode.data.choices?.length === 1) {
+            const grandTarget = targetNode.data.choices[0].targetNodeId;
+            if (hiddenEndingNodeIds.has(grandTarget)) {
+              choice.visibility = 'hidden' as any;
+              repairs.push(`🔒 隐藏选项：「${choice.text}」→ 间接通往隐藏结局`);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // ============================================================
   // Phase 4: Repair + Layout
   // ============================================================
   const repaired = repairBranchStructure(allNodes, allEdges);
@@ -631,23 +691,28 @@ const generateBranches: ToolExecutor = async (_input, ctx) => {
   const endingIssues = checkEndingIssues(allNodes, repairedEdges);
   repairs.push(...endingIssues);
 
-  // Layout + config node
+  // Layout + config node (reuse existing if present, don't duplicate)
   if (allNodes.length > 0) {
     const layoutedNodes = layoutNodes(allNodes, repairedEdges);
     const rootNode = layoutedNodes.find((n) => n.type === 'start') || layoutedNodes[0];
-    const configNode: StoryNode = {
-      id: 'story-config',
-      type: 'story_config' as const,
-      position: { x: rootNode?.position?.x || 0, y: (rootNode?.position?.y || 0) - 120 },
-      data: {
-        title: useStoryStore.getState().story?.title || '故事配置',
-        narration: '', dialogue: null, character: null,
-        imageUrl: null, imagePrompt: '', audioUrl: null,
-        choices: [], allowCustomInput: false, depth: -1,
-        voiceSegments: [], frames: [],
-        metadata: { tags: [], storyContext: '' },
-      },
-    };
+
+    // Check if story-config already exists (from initStory or previous run)
+    const existingConfig = useStoryStore.getState().story?.nodes?.find((n) => n.id === 'story-config');
+    const configNode: StoryNode = existingConfig
+      ? { ...existingConfig, position: { x: rootNode?.position?.x || 0, y: (rootNode?.position?.y || 0) - 120 } }
+      : {
+          id: 'story-config',
+          type: 'story_config' as const,
+          position: { x: rootNode?.position?.x || 0, y: (rootNode?.position?.y || 0) - 120 },
+          data: {
+            title: useStoryStore.getState().story?.title || '故事配置',
+            narration: '', dialogue: null, character: null,
+            imageUrl: null, imagePrompt: '', audioUrl: null,
+            choices: [], allowCustomInput: false, depth: -1,
+            voiceSegments: [], frames: [],
+            metadata: { tags: [], storyContext: '' },
+          },
+        };
     useStoryStore.getState().setNodesAndEdges([configNode, ...layoutedNodes], repairedEdges);
   }
 

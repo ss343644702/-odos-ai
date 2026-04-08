@@ -31,3 +31,11 @@ export async function uploadAudio(buffer: Buffer, filename: string): Promise<str
   });
   return result.url;
 }
+
+export async function uploadFile(buffer: Buffer, filename: string, contentType: string): Promise<string> {
+  const ossClient = getClient();
+  const result = await ossClient.put(filename, buffer, {
+    headers: { 'Content-Type': contentType },
+  });
+  return result.url;
+}

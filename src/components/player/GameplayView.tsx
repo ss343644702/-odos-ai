@@ -24,11 +24,10 @@ function isStubNode(node: any): boolean {
 /** Check if a node has core content ready (narration + voice). Images are optional — don't block navigation. */
 function isNodeReady(node: any): boolean {
   if (!node) return false;
-  // Mainline authored nodes are always ready
-  if (node.type !== 'ai_generated' && node.type !== 'ending') return true;
+  // Non-AI nodes (authored mainline: start, scene, ending) are always ready
+  if (node.type !== 'ai_generated') return true;
   if (!node.data?.narration) return false;
   if (!(node.data?.voiceSegments?.length > 0)) return false;
-  // Images are NOT required to navigate — they enhance but don't block
   return true;
 }
 
@@ -278,6 +277,30 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
   const isEnding = currentNode.type === 'ending';
   const progress = session ? (session.history.length / ((story.nodes?.length || 1) * 0.6)) * 100 : 0;
 
+  // Achievement tracking: two badges per story, each only once, saved to server + localStorage
+  useEffect(() => {
+    if (!isEnding || !story || !session) return;
+
+    const isHidden = currentNode.data.metadata?.endingType === 'hidden'
+      || currentNode.data.metadata?.endingType === 'best'
+      || currentNode.data.metadata?.tags?.includes('hidden_ending')
+      || currentNode.data.metadata?.tags?.includes('best_ending');
+
+    const badge = isHidden ? 'hiddenUnlocked' : 'completed';
+    const existing = JSON.parse(localStorage.getItem(`achievements_${story.id}`) || '{}');
+    if (existing[badge]) return; // already marked
+
+    const updated = { ...existing, [badge]: true };
+    // Save to localStorage (offline fallback)
+    localStorage.setItem(`achievements_${story.id}`, JSON.stringify(updated));
+    // Save to server
+    fetch(`/api/sessions/${session.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ achievements: updated }),
+    }).catch(() => {});
+  }, [isEnding, story, session, currentNode]);
+
   return (
     <div
       className="min-h-screen flex flex-col"
@@ -457,10 +480,10 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
           ) : (
             <>
               <ChoicePanel
-                choices={currentNode.data.choices || []}
+                choices={(currentNode.data.choices || []).filter((c: any) => !c.visibility || c.visibility !== 'hidden')}
                 onChoose={handleChoose}
               />
-              <CustomInput nodeId={currentNode.id} storyId={story.id} />
+              {!isPreview && <CustomInput nodeId={currentNode.id} storyId={story.id} />}
             </>
           )}
         </div>

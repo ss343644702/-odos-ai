@@ -60,7 +60,7 @@ export interface ReactModelConfig {
 }
 
 export const DEFAULT_REACT_CONFIG: ReactModelConfig = {
-  modelId: 'deepseek/deepseek-chat-v3',
+  modelId: 'deepseek-chat',
   maxTurns: 30,
   temperature: 0.3,
   maxTokens: 2048,

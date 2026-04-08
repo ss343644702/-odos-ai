@@ -149,6 +149,7 @@ export default function EditorPage() {
                 settings: s.settings,
                 style: s.style,
                 worldView: s.worldView,
+                playerObjective: s.playerObjective || undefined,
               },
               entities: s.entities || undefined,
             }),

@@ -67,6 +67,7 @@ model PlaySession {
 
   currentNodeId String
   history       Json     // PlayStep[]
+  achievements  Json?    // { completed?: boolean, hiddenUnlocked?: boolean }
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 

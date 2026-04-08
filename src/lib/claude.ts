@@ -122,6 +122,7 @@ export async function callLLM(params: {
   temperature?: number;
   maxTokens?: number;
   skill?: string;
+  responseFormat?: { type: 'json_object' };
 }): Promise<string> {
   const messages: ChatMessage[] = [
     { role: 'system', content: params.systemPrompt },
@@ -132,7 +133,11 @@ export async function callLLM(params: {
   try {
     const { content } = await fetchWithRetry(
       DEEPSEEK_API_URL, DEEPSEEK_API_KEY,
-      { model: DEEPSEEK_MODEL, messages, temperature: params.temperature || 0.7, max_tokens: params.maxTokens || 4096 },
+      {
+        model: DEEPSEEK_MODEL, messages,
+        temperature: params.temperature || 0.7, max_tokens: params.maxTokens || 4096,
+        ...(params.responseFormat ? { response_format: params.responseFormat } : {}),
+      },
       traceId, params.skill,
     );
     return content;
@@ -171,6 +176,7 @@ export async function callLLMStream(params: {
     body: JSON.stringify({
       model: DEEPSEEK_MODEL, messages,
       temperature: params.temperature || 0.7, max_tokens: params.maxTokens || 4096, stream: true,
+      // Note: DeepSeek streaming does NOT support response_format, omit it
     }),
   });
 
@@ -261,18 +267,51 @@ export async function callDeepSeek(params: {
 // ============================================================
 
 export function parseJsonFromResponse(text: string): any {
-  const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || text.match(/(\{[\s\S]*\})/);
+  // Match closed code block, or unclosed code block (truncated output), or raw JSON
+  const jsonMatch =
+    text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) ||       // closed ```json ... ```
+    text.match(/```(?:json)?\s*([\s\S]+)/) ||               // unclosed ```json ... (truncated)
+    text.match(/(\{[\s\S]*\})/);                             // raw { ... }
   let jsonStr: string;
   if (jsonMatch) {
     jsonStr = jsonMatch[1].trim();
+    // Remove trailing ``` if captured in unclosed match
+    jsonStr = jsonStr.replace(/```\s*$/, '').trim();
   } else {
     const startIdx = text.indexOf('{');
     if (startIdx === -1) throw new Error('No JSON found in response');
     jsonStr = text.slice(startIdx).trim();
   }
+  // Ensure jsonStr starts with {
+  const braceIdx = jsonStr.indexOf('{');
+  if (braceIdx > 0) jsonStr = jsonStr.slice(braceIdx);
 
-  try { return JSON.parse(jsonStr); } catch {}
-  try { return JSON.parse(repairTruncatedJson(jsonStr)); } catch {}
+  try { return JSON.parse(jsonStr); } catch (e1: any) {
+    console.log(`[JSON-PARSE] Attempt 1 failed: ${e1.message}`);
+  }
+  try {
+    const repaired = repairTruncatedJson(jsonStr);
+    return JSON.parse(repaired);
+  } catch (e2: any) {
+    console.log(`[JSON-PARSE] Attempt 2 failed: ${e2.message}`);
+  }
+
+  // Attempt 2.5: Fix common DeepSeek JSON formatting issues
+  try {
+    let fixed = jsonStr;
+    // Fix: unquoted string values after colon - "key": value → "key": "value"
+    // Matches ": followed by a non-JSON-value character (not " { [ digit - true/false/null)
+    fixed = fixed.replace(/":\s*([^\s"'{\[\d\-tfn][^\n,\]}]*)/g, (m, val) => {
+      const trimmed = val.trimEnd().replace(/,\s*$/, '');
+      return `": "${trimmed}"${val.endsWith(',') ? ',' : ''}`;
+    });
+    // Fix: missing comma between "value""key" → "value", "key"
+    // Only when pattern is "..."[whitespace]"[a-z] (end of value followed by start of key)
+    fixed = fixed.replace(/"\s*\n(\s*)"(?=[a-zA-Z_])/g, '",\n$1"');
+    return JSON.parse(repairTruncatedJson(fixed));
+  } catch (e25: any) {
+    console.log(`[JSON-PARSE] Attempt 2.5 failed: ${e25.message}`);
+  }
 
   let cleaned = jsonStr;
   cleaned = cleaned.replace(/:\s*\*\*([^*\n]*)\*\*/g, ': "$1"');

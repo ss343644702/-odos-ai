@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useEditorStore } from '@/stores/editorStore';
 import { useStoryStore } from '@/stores/storyStore';
@@ -41,7 +41,23 @@ export default function PublishDialog() {
   const [tags, setTags] = useState<string[]>(defaultTags);
   const [newTag, setNewTag] = useState('');
   const [publishing, setPublishing] = useState(false);
+  const [uploadingCover, setUploadingCover] = useState(false);
   const [error, setError] = useState('');
+  const coverFileRef = useRef<HTMLInputElement>(null);
+
+  const handleCoverUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadingCover(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const res = await fetch('/api/upload', { method: 'POST', body: formData });
+      const { url } = await res.json();
+      if (url) setCoverUrl(url);
+    } catch { /* silent */ }
+    setUploadingCover(false);
+  };
 
   if (!publishDialogOpen || !story) return null;
 
@@ -139,27 +155,46 @@ export default function PublishDialog() {
         {/* Cover image */}
         <div className="mb-4">
           <label className="text-xs font-medium mb-1.5 block" style={{ color: 'var(--text-secondary)' }}>封面图片</label>
+          <input ref={coverFileRef} type="file" accept="image/*" className="hidden" onChange={handleCoverUpload} />
           {coverUrl ? (
             <div className="relative rounded-lg overflow-hidden" style={{ border: '1px solid var(--border)' }}>
               <img src={coverUrl} alt="封面" className="w-full aspect-video object-cover" />
-              <button
-                onClick={() => setCoverUrl('')}
-                className="absolute top-2 right-2 px-2 py-1 rounded text-[10px]"
-                style={{ background: 'rgba(0,0,0,0.6)', color: 'white' }}
-              >
-                更换
-              </button>
+              <div className="absolute top-2 right-2 flex gap-1">
+                <button
+                  onClick={() => coverFileRef.current?.click()}
+                  className="px-2 py-1 rounded text-[10px]"
+                  style={{ background: 'rgba(0,0,0,0.6)', color: 'white' }}
+                >
+                  上传新封面
+                </button>
+                <button
+                  onClick={() => setCoverUrl('')}
+                  className="px-2 py-1 rounded text-[10px]"
+                  style={{ background: 'rgba(0,0,0,0.6)', color: 'white' }}
+                >
+                  移除
+                </button>
+              </div>
             </div>
           ) : (
-            <div
-              className="w-full aspect-video rounded-lg flex items-center justify-center text-xs cursor-pointer"
-              style={{ background: 'var(--bg-tertiary)', color: 'var(--text-muted)', border: '1px dashed var(--border)' }}
-              onClick={() => {
-                // Use first available image
-                if (defaultCover) setCoverUrl(defaultCover);
-              }}
-            >
-              {defaultCover ? '点击使用自动封面' : '暂无封面图片'}
+            <div className="w-full aspect-video rounded-lg flex flex-col items-center justify-center gap-2" style={{ background: 'var(--bg-tertiary)', border: '1px dashed var(--border)' }}>
+              <button
+                onClick={() => coverFileRef.current?.click()}
+                disabled={uploadingCover}
+                className="px-3 py-1.5 rounded-lg text-xs"
+                style={{ background: 'var(--accent)', color: 'white' }}
+              >
+                {uploadingCover ? '上传中...' : '上传封面'}
+              </button>
+              {defaultCover && (
+                <button
+                  onClick={() => setCoverUrl(defaultCover)}
+                  className="text-[10px]"
+                  style={{ color: 'var(--text-muted)' }}
+                >
+                  或使用自动生成的封面
+                </button>
+              )}
             </div>
           )}
         </div>

@@ -116,13 +116,17 @@ export interface StoryNodeData {
     convergenceTarget?: string;   // For converge_bridge nodes: target mainline node ID
     convergenceHint?: string;     // Hint for bridge narration direction
     bridgeDepth?: number;         // How many bridge steps taken so far
+    endingType?: 'normal' | 'good' | 'bad' | 'best' | 'hidden';  // For ending nodes
   };
 }
+
+export type ChoiceVisibility = 'visible' | 'hidden';
 
 export interface Choice {
   id: string;
   text: string;
   targetNodeId: string;
+  visibility?: ChoiceVisibility;  // default: 'visible'
 }
 
 export interface VoiceSegment {
@@ -224,6 +228,12 @@ export interface PlaySession {
   history: PlayStep[];
   createdAt: string;
   updatedAt: string;
+}
+
+// Achievement tracking per story (max once each per story)
+export interface StoryAchievements {
+  completed?: boolean;       // 完成一个非隐藏结局
+  hiddenUnlocked?: boolean;  // 成功解锁隐藏结局
 }
 
 export interface PlayStep {

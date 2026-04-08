@@ -9,13 +9,27 @@ export async function PUT(
   const { id } = await params;
   const body = await request.json();
 
-  const session = await prisma.playSession.update({
-    where: { id },
-    data: {
-      currentNodeId: body.currentNodeId,
-      history: body.history,
-    },
-  });
+  try {
+    const data: Record<string, any> = {};
+    if (body.currentNodeId !== undefined) data.currentNodeId = body.currentNodeId;
+    if (body.history !== undefined) data.history = body.history;
+    if (body.achievements !== undefined) data.achievements = body.achievements;
 
-  return NextResponse.json({ success: true, updatedAt: session.updatedAt });
+    const session = await prisma.playSession.update({
+      where: { id },
+      data,
+    });
+
+    return NextResponse.json({ success: true, updatedAt: session.updatedAt });
+  } catch (err: any) {
+    // If achievements field doesn't exist in DB yet, retry without it
+    if (err.message?.includes('achievements') || err.message?.includes('Unknown argument')) {
+      const data: Record<string, any> = {};
+      if (body.currentNodeId !== undefined) data.currentNodeId = body.currentNodeId;
+      if (body.history !== undefined) data.history = body.history;
+      const session = await prisma.playSession.update({ where: { id }, data });
+      return NextResponse.json({ success: true, updatedAt: session.updatedAt });
+    }
+    return NextResponse.json({ error: err.message }, { status: 500 });
+  }
 }

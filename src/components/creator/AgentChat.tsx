@@ -1587,11 +1587,16 @@ export default function AgentChat() {
     // ========== ReAct Mode (only mode) ==========
     addMessage({ role: 'user', content: text });
     // Resume if loop has existing progress — don't reset completed skills
-    const hasExistingProgress = useChatStore.getState().orchestrator.skills.some(s => s.status === 'completed');
-    const isRunning = reactLoop.status === 'thinking' || reactLoop.status === 'acting';
+    const skills = useChatStore.getState().orchestrator.skills;
+    const hasExistingProgress = skills.some(s => s.status !== 'idle');
+    const loopStatus = reactLoop.status;
+    const isRunning = loopStatus === 'thinking' || loopStatus === 'acting';
+
+    console.log(`[handleSend] loopStatus=${loopStatus}, hasExistingProgress=${hasExistingProgress}, skills=${skills.map(s => `${s.name}:${s.status}`).join(',')}`);
 
     if (hasExistingProgress && !isRunning) {
       // Continue existing conversation — don't reset skills
+      console.log('[handleSend] → resumeLoop');
       reactLoop.resumeLoop(text);
     } else if (!isRunning) {
       // Fresh start — no existing progress
@@ -1699,7 +1704,7 @@ export default function AgentChat() {
               {isReplyAnchor && <div ref={newReplyAnchorRef} className="h-0" />}
               <div className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                 <div
-                  className="max-w-[90%] rounded-xl px-3 py-2 text-sm whitespace-pre-wrap"
+                  className="max-w-[90%] rounded-xl px-3 py-2 text-sm whitespace-pre-wrap break-words"
                   style={{
                     background: msg.role === 'user' ? 'var(--accent)' : 'var(--bg-tertiary)',
                     color: msg.role === 'user' ? 'white' : 'var(--text-primary)',

@@ -71,7 +71,9 @@
       "Read(//usr/local/bin/**)",
       "Read(//opt/homebrew/bin/**)",
       "Bash(ls -la /Users/bytedance/AI斯坦福/src/app/\\\\\\(player\\\\\\)/)",
-      "Bash(export PATH=\"/usr/local/bin:/opt/homebrew/bin:$PATH\")"
+      "Bash(export PATH=\"/usr/local/bin:/opt/homebrew/bin:$PATH\")",
+      "Bash(grep -n \"playerObjective\\\\|auto.*save\\\\|fetch.*api\" /Users/bytedance/AI斯坦福/src/app/\\\\\\(creator\\\\\\)/editor/[storyId]/page.tsx)",
+      "Bash(grep -A 15 \"Auto-save to DB\" /Users/bytedance/AI斯坦福/src/app/\\\\\\(creator\\\\\\)/editor/[storyId]/page.tsx)"
     ]
   }
 }

@@ -43,6 +43,7 @@ export default function PlayPage() {
           settings: storyData.settings || { defaultVoice: 'narrator', imageStyle: '', language: 'zh-CN', maxDepth: 5, endingCount: 3 },
           worldView: storyData.worldView || '',
           style: storyData.style || { styleId: '', styleName: '', stylePromptPrefix: '', colorTone: '', lightingStyle: '' },
+          playerObjective: storyData.playerObjective || null,
           entities: (dbStory as any).entities || null,
         };
 

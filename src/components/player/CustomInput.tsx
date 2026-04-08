@@ -300,7 +300,24 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
     }
 
     if (result.action === 'navigate_existing' && result.targetNodeId) {
+      // Check if player triggered a hidden/best choice
+      const allNodes = usePlayerStore.getState().story?.nodes || [];
+      const currentNodeData = allNodes.find((n) => n.id === nodeId);
+      const matchedChoice = currentNodeData?.data.choices?.find((c: any) => c.targetNodeId === result.targetNodeId);
+      const isHidden = matchedChoice?.visibility === 'hidden';
+
       navigateToNode(result.targetNodeId, text);
+
+      // Record hidden trigger for future achievement system
+      if (isHidden) {
+        const sess = usePlayerStore.getState().session;
+        if (sess && sess.history.length > 0) {
+          const lastStep = sess.history[sess.history.length - 1] as any;
+          lastStep.triggeredHidden = true;
+          lastStep.hiddenChoiceText = matchedChoice?.text || '';
+        }
+      }
+
       setBranching(false);
       return;
     }
