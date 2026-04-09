@@ -34,6 +34,26 @@ export async function uploadAudio(buffer: Buffer, filename: string): Promise<str
 
 export async function uploadFile(buffer: Buffer, filename: string, contentType: string): Promise<string> {
   const ossClient = getClient();
+
+  // Large files (>2MB): use multipart upload for reliability
+  if (buffer.length > 2 * 1024 * 1024) {
+    const fs = require('fs');
+    const tmpPath = `/tmp/oss_upload_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    fs.writeFileSync(tmpPath, buffer);
+    try {
+      await ossClient.multipartUpload(filename, tmpPath, {
+        headers: { 'Content-Type': contentType },
+        timeout: 120000,
+      });
+      const bucket = process.env.OSS_BUCKET || 'odosai';
+      const endpoint = process.env.OSS_ENDPOINT || 'oss-cn-beijing.aliyuncs.com';
+      return `http://${bucket}.${endpoint}/${filename}`;
+    } finally {
+      try { fs.unlinkSync(tmpPath); } catch {}
+    }
+  }
+
+  // Small files: simple upload
   const result = await ossClient.put(filename, buffer, {
     headers: { 'Content-Type': contentType },
   });

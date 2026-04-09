@@ -38,8 +38,12 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
   generatedBranches: [],
 
   initSession: (story) => {
-    const nodes = story.nodes || [];
+    const nodes = (story.nodes || []).filter((n) => n.type !== 'story_config');
     const startNode = nodes.find((n) => n.type === 'start') || nodes[0];
+    if (!startNode) {
+      set({ story, session: null, currentNode: null });
+      return;
+    }
     const session: PlaySession = {
       id: uuid(),
       storyId: story.id,

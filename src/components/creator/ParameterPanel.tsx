@@ -180,7 +180,7 @@ export default function ParameterPanel() {
   }, [node, addFrame]);
 
   // Upload local image for a frame
-  const handleUploadFrameImage = useCallback(async (frameId: string, file: File) => {
+  const handleUploadFrameMedia = useCallback(async (frameId: string, file: File) => {
     if (!node) return;
     setUploadingFrameId(frameId);
     try {
@@ -189,7 +189,21 @@ export default function ParameterPanel() {
       const res = await fetch('/api/upload', { method: 'POST', body: formData });
       const data = await res.json();
       if (data.url) {
-        updateFrame(node.id, frameId, { imageUrl: data.url });
+        const isVideo = file.type === 'video/mp4';
+        const isGif = file.type === 'image/gif';
+        if (isVideo || isGif) {
+          updateFrame(node.id, frameId, {
+            mediaType: isVideo ? 'video' : 'gif',
+            mediaUrl: data.url,
+            imageUrl: null, // clear static image
+          } as any);
+        } else {
+          updateFrame(node.id, frameId, {
+            imageUrl: data.url,
+            mediaType: 'image',
+            mediaUrl: null,
+          } as any);
+        }
       }
     } catch { /* silent */ }
     setUploadingFrameId(null);
@@ -333,7 +347,7 @@ export default function ParameterPanel() {
                       border: `1px solid ${i === activeFrameTab ? 'var(--accent)' : 'transparent'}`,
                     }}
                   >
-                    {i + 1}{f.imageUrl ? ' ✓' : ''}{hasVoice ? ' ♪' : ''}
+                    {i + 1}{(f as any).mediaType === 'video' ? ' 🎬' : (f as any).mediaType === 'gif' ? ' 🎞' : f.imageUrl ? ' ✓' : ''}{hasVoice ? ' ♪' : ''}
                   </button>
                 );
               })}
@@ -347,14 +361,28 @@ export default function ParameterPanel() {
 
             return (
               <div className="rounded-lg overflow-hidden" style={{ border: '1px solid var(--border)' }}>
-                {/* Image area */}
-                {frame.imageUrl ? (
+                {/* Media area (image / video / GIF) */}
+                {(frame.imageUrl || (frame as any).mediaUrl) ? (
                   <div className="relative">
-                    <img
-                      src={frame.imageUrl} alt=""
-                      className="w-full aspect-video object-cover cursor-pointer"
-                      onClick={() => setLightboxImage(frame.imageUrl)}
-                    />
+                    {(frame as any).mediaType === 'video' ? (
+                      <video
+                        src={(frame as any).mediaUrl}
+                        className="w-full aspect-video object-cover"
+                        controls muted playsInline
+                      />
+                    ) : (frame as any).mediaType === 'gif' ? (
+                      <img
+                        src={(frame as any).mediaUrl}
+                        alt="" className="w-full aspect-video object-cover cursor-pointer"
+                        onClick={() => setLightboxImage((frame as any).mediaUrl)}
+                      />
+                    ) : (
+                      <img
+                        src={frame.imageUrl!} alt=""
+                        className="w-full aspect-video object-cover cursor-pointer"
+                        onClick={() => setLightboxImage(frame.imageUrl)}
+                      />
+                    )}
                     <div className="absolute bottom-1.5 right-1.5 flex gap-1">
                       <label
                         className="text-[10px] px-2 py-0.5 rounded cursor-pointer"
@@ -362,8 +390,8 @@ export default function ParameterPanel() {
                       >
                         {uploadingFrameId === frame.id ? '上传中...' : '上传替换'}
                         <input
-                          type="file" accept="image/*" className="hidden"
-                          onChange={(e) => { const f = e.target.files?.[0]; if (f) handleUploadFrameImage(frame.id, f); e.target.value = ''; }}
+                          type="file" accept="image/*,video/mp4,.gif" className="hidden"
+                          onChange={(e) => { const f = e.target.files?.[0]; if (f) handleUploadFrameMedia(frame.id, f); e.target.value = ''; }}
                         />
                       </label>
                       <button
@@ -389,10 +417,10 @@ export default function ParameterPanel() {
                         className="text-[10px] px-3 py-1 rounded-md cursor-pointer"
                         style={{ border: '1px solid var(--border)', color: 'var(--text-secondary)' }}
                       >
-                        {uploadingFrameId === frame.id ? '上传中...' : '上传图片'}
+                        {uploadingFrameId === frame.id ? '上传中...' : '上传图片/视频'}
                         <input
-                          type="file" accept="image/*" className="hidden"
-                          onChange={(e) => { const f = e.target.files?.[0]; if (f) handleUploadFrameImage(frame.id, f); e.target.value = ''; }}
+                          type="file" accept="image/*,video/mp4,.gif" className="hidden"
+                          onChange={(e) => { const f = e.target.files?.[0]; if (f) handleUploadFrameMedia(frame.id, f); e.target.value = ''; }}
                         />
                       </label>
                       <button

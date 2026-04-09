@@ -55,21 +55,52 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
   const voiceSegments = currentNode?.data.voiceSegments || [];
   const frames = currentNode ? getDisplayFrames(currentNode.data) : [];
 
-  // Map segment index to a frame for image display
-  const getImageForSegment = (segIdx: number): string | undefined => {
-    const fallback = currentNode?.data.imageUrl || undefined;
-    if (frames.length === 0) return fallback;
-    if (frames.length === 1) return frames[0].imageUrl || fallback;
-    const frameIdx = Math.min(
+  // Map segment index to a frame index
+  const getFrameIndexForSegment = (segIdx: number): number => {
+    if (frames.length <= 1) return 0;
+    return Math.min(
       Math.floor(segIdx * frames.length / Math.max(voiceSegments.length, 1)),
       frames.length - 1
     );
-    return frames[frameIdx]?.imageUrl || fallback;
   };
 
-  const currentImage = voiceSegments.length > 0
-    ? getImageForSegment(currentSegmentIndex)
-    : (frames[0]?.imageUrl || currentNode?.data.imageUrl);
+  // When voice segments exist, map segment → frame. When no voice, use segment index directly as frame index.
+  const currentFrameIndex = voiceSegments.length > 0
+    ? getFrameIndexForSegment(currentSegmentIndex)
+    : Math.min(currentSegmentIndex, frames.length - 1);
+  const currentFrame = frames[currentFrameIndex] || null;
+  const currentImage = currentFrame?.imageUrl || currentNode?.data.imageUrl || undefined;
+  const currentMediaType = (currentFrame as any)?.mediaType || 'image';
+  const currentMediaUrl = (currentFrame as any)?.mediaUrl || null;
+
+  // Video-voice sync: both must complete before advancing to next frame
+  const videoEndedRef = useRef(false);
+  const voiceDoneForFrameRef = useRef(false);
+  const pendingSegmentRef = useRef<number | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  // Helper: try to advance to next frame if both video and voice are done
+  const tryAdvanceFrame = () => {
+    if (!videoEndedRef.current || !voiceDoneForFrameRef.current) return;
+    if (pendingSegmentRef.current !== null) {
+      const nextSeg = pendingSegmentRef.current;
+      pendingSegmentRef.current = null;
+      setCurrentSegmentIndex(nextSeg);
+      // Resume narration from the next frame's first segment
+      setTimeout(() => narrationRef.current?.playFromSegment(nextSeg), 100);
+    } else if (currentFrameIndex >= frames.length - 1) {
+      setShowChoices(true);
+    }
+  };
+
+  // Reset sync state on frame change (or initial load)
+  const prevFrameIndexRef = useRef<number | null>(null);
+  if (currentFrameIndex !== prevFrameIndexRef.current) {
+    prevFrameIndexRef.current = currentFrameIndex;
+    videoEndedRef.current = currentMediaType !== 'video'; // non-video → already "ended"
+    voiceDoneForFrameRef.current = voiceSegments.length === 0; // no voice → already "done"
+    pendingSegmentRef.current = null;
+  }
 
   const currentText = voiceSegments.length > 0
     ? (voiceSegments[currentSegmentIndex]?.text || '')
@@ -123,31 +154,64 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
   }, [currentNode?.id, currentSegmentIndex]);
 
   const handleSegmentChange = useCallback((segIndex: number) => {
+    const nextFrameIdx = frames.length > 1
+      ? Math.min(Math.floor(segIndex * frames.length / Math.max(voiceSegments.length, 1)), frames.length - 1)
+      : 0;
+    const curFrameIdx = frames.length > 1
+      ? Math.min(Math.floor(currentSegmentIndex * frames.length / Math.max(voiceSegments.length, 1)), frames.length - 1)
+      : 0;
+
+    if (nextFrameIdx !== curFrameIdx) {
+      // Voice reached next frame — pause narration, mark done, wait for video
+      narrationRef.current?.stop();
+      voiceDoneForFrameRef.current = true;
+      pendingSegmentRef.current = segIndex;
+      tryAdvanceFrame();
+      return;
+    }
+
     setCurrentSegmentIndex(segIndex);
-    // Hide choices when playback moves to a non-last segment (e.g. replaying from start)
     if (segIndex < (voiceSegments.length - 1)) {
       setShowChoices(false);
     }
-  }, [voiceSegments.length]);
+  }, [voiceSegments.length, frames.length, currentSegmentIndex]);
 
   const handleNarrationEnd = useCallback(() => {
     setNarrationDone(true);
-  }, []);
+    // All voice segments done — mark voice done for current frame and try advance
+    voiceDoneForFrameRef.current = true;
+    if (currentFrameIndex < frames.length - 1) {
+      // Find first segment of next frame
+      const nextSeg = voiceSegments.findIndex((_, i) => getFrameIndexForSegment(i) > currentFrameIndex);
+      pendingSegmentRef.current = nextSeg >= 0 ? nextSeg : currentFrameIndex + 1;
+      tryAdvanceFrame();
+    } else {
+      tryAdvanceFrame();
+    }
+  }, [currentFrameIndex, frames.length, voiceSegments]);
 
-  // Show choices only when narration is done, typewriter finished, AND we're on the last segment
+  // Show choices only when narration done, typewriter finished, last segment, and no video still playing
   useEffect(() => {
     if (isTyping || !narrationDone) return;
     const isLastSegment = voiceSegments.length === 0 || currentSegmentIndex >= voiceSegments.length - 1;
-    if (isLastSegment) {
+    const isLastFrame = currentFrameIndex >= frames.length - 1;
+    const lastFrameIsVideo = isLastFrame && currentMediaType === 'video';
+    // If last frame is a video, let tryAdvanceFrame/onEnded handle showChoices instead
+    if (isLastSegment && isLastFrame && !lastFrameIsVideo) {
       setShowChoices(true);
     }
-  }, [isTyping, narrationDone, currentSegmentIndex, voiceSegments.length]);
+  }, [isTyping, narrationDone, currentSegmentIndex, voiceSegments.length, currentFrameIndex, frames.length, currentMediaType]);
 
   // Skip / advance
   const handleTap = useCallback(() => {
     if (!currentNode || showChoices) return;
     if (typewriterRef.current) clearTimeout(typewriterRef.current);
     narrationRef.current?.stop();
+    // Stop video if playing
+    if (videoRef.current) { videoRef.current.pause(); }
+    videoEndedRef.current = true;
+    voiceDoneForFrameRef.current = true;
+    pendingSegmentRef.current = null;
     const lastText = voiceSegments.length > 0
       ? voiceSegments[voiceSegments.length - 1].text
       : (currentNode.data.narration || '');
@@ -155,6 +219,7 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
     if (voiceSegments.length > 0) setCurrentSegmentIndex(voiceSegments.length - 1);
     setIsTyping(false);
     setNarrationDone(true);
+    setShowChoices(true);
   }, [currentNode, showChoices, voiceSegments]);
 
   const navigateToNode = usePlayerStore((s) => s.navigateToNode);
@@ -292,9 +357,18 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
   }, [isEnding, story, session, currentNode]);
 
   if (!currentNode || !story) {
+    const hasNodes = (story?.nodes || []).filter(n => n.type !== 'story_config').length > 0;
     return (
-      <div className="min-h-screen flex items-center justify-center" style={{ color: 'var(--text-muted)' }}>
-        加载中...
+      <div className="min-h-screen flex flex-col items-center justify-center gap-2" style={{ color: 'var(--text-muted)' }}>
+        {story && !hasNodes ? (
+          <>
+            <div className="text-3xl opacity-30">🎬</div>
+            <p className="text-sm">还没有可播放的节点</p>
+            <p className="text-xs">请先在编辑器中创建故事内容</p>
+          </>
+        ) : (
+          <span>加载中...</span>
+        )}
       </div>
     );
   }
@@ -359,18 +433,41 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
         </button>
       </div>
 
-      {/* Story image */}
+      {/* Story media (image / video / GIF) */}
       <div className="relative">
-        <div
-          className="w-full aspect-[4/3] flex items-center justify-center transition-all duration-500"
-          style={{
-            background: currentImage
-              ? `url(${currentImage}) center/cover`
-              : 'linear-gradient(135deg, var(--bg-tertiary), var(--bg-secondary))',
-          }}
-        >
-          {!currentImage && <div className="text-5xl opacity-30">🎬</div>}
-        </div>
+        {currentMediaType === 'video' && currentMediaUrl ? (
+          <video
+            ref={videoRef}
+            key={currentMediaUrl}
+            src={currentMediaUrl}
+            className="w-full aspect-[4/3] object-cover"
+            autoPlay playsInline muted={isMuted}
+            onEnded={() => {
+              videoEndedRef.current = true;
+              // No voice segments → also mark voice done + set pending for next frame
+              if (voiceSegments.length === 0 || !voiceSegments.some((s: any) => s.audioUrl)) {
+                voiceDoneForFrameRef.current = true;
+                if (currentFrameIndex < frames.length - 1) {
+                  pendingSegmentRef.current = currentFrameIndex + 1;
+                }
+              }
+              tryAdvanceFrame();
+            }}
+          />
+        ) : currentMediaType === 'gif' && currentMediaUrl ? (
+          <img src={currentMediaUrl} alt="" className="w-full aspect-[4/3] object-cover" />
+        ) : (
+          <div
+            className="w-full aspect-[4/3] flex items-center justify-center transition-all duration-500"
+            style={{
+              background: currentImage
+                ? `url(${currentImage}) center/cover`
+                : 'linear-gradient(135deg, var(--bg-tertiary), var(--bg-secondary))',
+            }}
+          >
+            {!currentImage && <div className="text-5xl opacity-30">🎬</div>}
+          </div>
+        )}
 
         {voiceSegments.length > 1 && (
           <div className="absolute bottom-2 left-0 right-0 flex justify-center gap-1.5">

@@ -55,13 +55,17 @@ export interface StoryNode {
   data: StoryNodeData;
 }
 
+export type FrameMediaType = 'image' | 'video' | 'gif';
+
 export interface Frame {
   id: string;
   narrationSegment: string;  // 该画面对应的叙述文本
   imagePrompt: string;
   imageUrl: string | null;
-  entityRefs?: string[];     // 引用的实体 ID（角色/场景/道具）
-  duration: number;          // 建议展示时长（秒），默认 3
+  mediaType?: FrameMediaType; // 默认 'image'
+  mediaUrl?: string | null;   // 视频/GIF URL（mediaType 非 image 时使用）
+  entityRefs?: string[];      // 引用的实体 ID（角色/场景/道具）
+  duration: number;           // 建议展示时长（秒），默认 3
 }
 
 /** 语音生成后，将 voiceSegments 文字回写到 frames 的 narrationSegment */

@@ -56,7 +56,11 @@ function StoryNodeComponent({ data, selected }: StoryNodeProps) {
     );
   }
 
-  const thumbnailUrl = (data as any).frames?.[0]?.imageUrl || data.imageUrl;
+  const firstFrame = (data as any).frames?.[0];
+  const firstFrameMediaType = firstFrame?.mediaType || 'image';
+  const thumbnailUrl = firstFrame?.mediaUrl || firstFrame?.imageUrl || data.imageUrl;
+  const isVideoThumb = firstFrameMediaType === 'video';
+  const isGifThumb = firstFrameMediaType === 'gif';
   const frameCount = (data as any).frames?.length || 0;
 
   // Render output handles
@@ -117,17 +121,24 @@ function StoryNodeComponent({ data, selected }: StoryNodeProps) {
           boxShadow: selected ? `0 0 20px ${color}40` : 'none',
         }}
       >
-        {/* Image thumbnail */}
-        <div
-          className="w-full h-24 flex items-center justify-center text-xs relative"
+        {/* Media thumbnail */}
+        <div className="w-full h-24 flex items-center justify-center text-xs relative overflow-hidden"
           style={{
-            background: thumbnailUrl
-              ? `url(${thumbnailUrl}) center/cover`
-              : `linear-gradient(135deg, ${color}20, ${color}05)`,
+            background: !thumbnailUrl ? `linear-gradient(135deg, ${color}20, ${color}05)` : undefined,
             color: 'var(--text-muted)',
           }}
         >
-          {!thumbnailUrl && (
+          {isVideoThumb && thumbnailUrl ? (
+            <video
+              src={thumbnailUrl}
+              className="w-full h-full object-cover"
+              muted playsInline
+              onMouseEnter={(e) => (e.target as HTMLVideoElement).play()}
+              onMouseLeave={(e) => { const v = e.target as HTMLVideoElement; v.pause(); v.currentTime = 0; }}
+            />
+          ) : thumbnailUrl ? (
+            <div className="w-full h-full" style={{ background: `url(${thumbnailUrl}) center/cover` }} />
+          ) : (
             <div className="flex flex-col items-center gap-1">
               <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                 <rect x="3" y="3" width="18" height="18" rx="2" />
@@ -137,14 +148,19 @@ function StoryNodeComponent({ data, selected }: StoryNodeProps) {
               <span>待生成</span>
             </div>
           )}
-          {frameCount > 1 && (
-            <span
-              className="absolute top-1 right-1 text-[9px] font-bold px-1.5 py-0.5 rounded"
-              style={{ background: 'rgba(0,0,0,0.7)', color: 'white' }}
-            >
-              {frameCount} 帧
-            </span>
-          )}
+          {/* Badges */}
+          <div className="absolute top-1 right-1 flex gap-1">
+            {(isVideoThumb || isGifThumb) && (
+              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded" style={{ background: 'rgba(0,0,0,0.7)', color: 'white' }}>
+                {isVideoThumb ? '🎬' : '🎞'}
+              </span>
+            )}
+            {frameCount > 1 && (
+              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded" style={{ background: 'rgba(0,0,0,0.7)', color: 'white' }}>
+                {frameCount} 帧
+              </span>
+            )}
+          </div>
         </div>
 
         {/* Node info */}
