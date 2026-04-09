@@ -14,10 +14,12 @@ import { v4 as uuid } from 'uuid';
 // Helper: call skill API with SSE streaming support
 // ============================================================
 
-/** Skills that benefit from streaming (long-running LLM calls) */
+/** Skills that benefit from streaming (long-running LLM calls).
+ * Note: outlineGenerator and editOutline removed — DeepSeek stream returns 400 for large maxTokens.
+ * These skills use non-streaming callLLM directly (with json_object mode for reliable JSON). */
 const STREAMABLE_SKILLS = new Set([
-  'outlineGenerator', 'branchGenerator', 'branchComplete', 'entityExtractor',
-  'storyboardGenerator', 'voiceGenerator', 'expandNode', 'editOutline',
+  'branchGenerator', 'branchComplete', 'entityExtractor',
+  'storyboardGenerator', 'voiceGenerator', 'expandNode',
   'branchMainline', 'branchSubline',
 ]);
 
@@ -634,10 +636,10 @@ const generateBranches: ToolExecutor = async (_input, ctx) => {
   // ============================================================
   const hiddenEndings = (outline.endings || []).filter((e: any) => e.type === 'hidden');
   const hiddenEndingTitles = hiddenEndings.map((e: any) => e.title?.toLowerCase());
+  const hiddenEndingNodeIds = new Set<string>();
 
   if (hiddenEndingTitles.length > 0) {
     // Find ending nodes matching hidden endings from outline (fuzzy title match)
-    const hiddenEndingNodeIds = new Set<string>();
     for (const node of allNodes) {
       if (node.type === 'ending') {
         const titleLower = node.data.title?.toLowerCase() || '';
@@ -672,6 +674,60 @@ const generateBranches: ToolExecutor = async (_input, ctx) => {
             }
           }
         }
+      }
+    }
+  }
+
+  // ============================================================
+  // Phase 3.5b: Ensure hidden endings actually exist as nodes
+  // If LLM didn't generate a matching ending, create it explicitly
+  // ============================================================
+  if (hiddenEndingTitles.length > 0) {
+    for (const hiddenEnding of hiddenEndings) {
+      const alreadyExists = allNodes.some(n =>
+        n.type === 'ending' && hiddenEndingNodeIds.has(n.id)
+      );
+
+      if (!alreadyExists && hiddenEnding.title) {
+        const hiddenNode: StoryNode = {
+          id: `ending_hidden_${uuid().slice(0, 6)}`,
+          type: 'ending' as const,
+          position: { x: 0, y: 0 },
+          data: {
+            title: hiddenEnding.title,
+            narration: hiddenEnding.description || `你发现了隐藏结局：${hiddenEnding.title}`,
+            dialogue: null, character: null,
+            imageUrl: null, imagePrompt: '', audioUrl: null,
+            choices: [], allowCustomInput: false,
+            depth: outlineDepth,
+            voiceSegments: [], frames: [],
+            metadata: { endingType: 'hidden' as any, tags: ['hidden_ending'], storyContext: '' },
+          },
+        };
+
+        // Connect to deepest non-ending scene node via hidden choice
+        const candidates = allNodes
+          .filter(n => n.type !== 'ending' && n.type !== 'start' && n.type !== 'story_config' && (n.data.depth || 0) >= 1)
+          .sort((a, b) => (b.data.depth || 0) - (a.data.depth || 0));
+
+        const parent = candidates[0];
+        if (parent) {
+          const choiceId = `c_hidden_${uuid().slice(0, 6)}`;
+          parent.data.choices.push({
+            id: choiceId,
+            text: hiddenEnding.requirement || hiddenEnding.title,
+            targetNodeId: hiddenNode.id,
+            visibility: 'hidden' as any,
+          });
+          allEdges.push({
+            id: uuid(), source: parent.id, target: hiddenNode.id,
+            sourceHandle: choiceId, label: '', type: 'authored',
+          });
+        }
+
+        allNodes.push(hiddenNode);
+        hiddenEndingNodeIds.add(hiddenNode.id);
+        repairs.push(`🔒 补充创建隐藏结局节点：「${hiddenEnding.title}」`);
       }
     }
   }

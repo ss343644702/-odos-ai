@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { v4 as uuid } from 'uuid';
 import { useChatStore } from '@/stores/chatStore';
 import { useEditorStore } from '@/stores/editorStore';
 import { useStoryStore } from '@/stores/storyStore';
@@ -67,12 +68,27 @@ export default function StoryConfigPanel() {
   const orchestrator = useChatStore((s) => s.orchestrator);
   const updateEntityField = useChatStore((s) => s.updateEntityField);
   const updateEntityImage = useChatStore((s) => s.updateEntityImage);
+  const addEntity = useChatStore((s) => s.addEntity);
+  const removeEntity = useChatStore((s) => s.removeEntity);
+  const updateOutlineField = useChatStore((s) => s.updateOutlineField);
+  const addOutlineCharacter = useChatStore((s) => s.addOutlineCharacter);
+  const removeOutlineCharacter = useChatStore((s) => s.removeOutlineCharacter);
+  const updateOutlineCharacter = useChatStore((s) => s.updateOutlineCharacter);
+  const addOutlineEnding = useChatStore((s) => s.addOutlineEnding);
+  const removeOutlineEnding = useChatStore((s) => s.removeOutlineEnding);
+  const updateOutlineEnding = useChatStore((s) => s.updateOutlineEnding);
+  const addOutlinePlotPoint = useChatStore((s) => s.addOutlinePlotPoint);
+  const removeOutlinePlotPoint = useChatStore((s) => s.removeOutlinePlotPoint);
+  const updateOutlinePlotPoint = useChatStore((s) => s.updateOutlinePlotPoint);
   const story = useStoryStore((s) => s.story);
   const updateNode = useStoryStore((s) => s.updateNode);
   const updateSettings = useStoryStore((s) => s.updateSettings);
 
   const [entityTab, setEntityTab] = useState<'characters' | 'scenes' | 'props'>('characters');
   const [generatingIds, setGeneratingIds] = useState<Set<string>>(new Set());
+  const [addingEntity, setAddingEntity] = useState(false);
+  const [newEntityName, setNewEntityName] = useState('');
+  const [newEntityDesc, setNewEntityDesc] = useState('');
 
   // Lightbox state for entity images
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
@@ -363,55 +379,211 @@ export default function StoryConfigPanel() {
         </div>
       </Section>
 
-      {/* 2. Outline (readonly) */}
+      {/* 2. Outline (editable) */}
       <Section title="剧本大纲" icon="📋">
         {outline ? (
-          <>
-            <ReadonlyField label="主题" value={outline.theme} />
-            <ReadonlyField label="基调" value={outline.tone} />
-            <div className="flex gap-3 mb-2">
-              <span className="text-[10px] px-2 py-0.5 rounded" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' }}>
-                {outline.depth} 层
-              </span>
-              <span className="text-[10px] px-2 py-0.5 rounded" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' }}>
-                {outline.endings?.length || 0} 个结局
-              </span>
+          <div className="space-y-3">
+            {/* Theme + Tone */}
+            <div>
+              <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>主题</span>
+              <input
+                value={outline.theme}
+                onChange={(e) => updateOutlineField('theme', e.target.value)}
+                className="w-full px-2 py-1.5 rounded text-xs mt-0.5"
+                style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+              />
             </div>
-            {outline.characters && outline.characters.length > 0 && (
-              <div className="mb-2">
+            <div>
+              <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>基调</span>
+              <input
+                value={outline.tone}
+                onChange={(e) => updateOutlineField('tone', e.target.value)}
+                className="w-full px-2 py-1.5 rounded text-xs mt-0.5"
+                style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+              />
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>层数</span>
+              <input
+                type="number"
+                value={outline.depth}
+                onChange={(e) => updateOutlineField('depth', parseInt(e.target.value) || 3)}
+                min={2} max={10}
+                className="w-16 px-2 py-1 rounded text-xs text-right"
+                style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+              />
+            </div>
+
+            {/* Characters */}
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
                 <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>角色</span>
-                <div className="mt-1 space-y-1">
-                  {outline.characters.map((c, i) => (
-                    <div key={i} className="text-xs" style={{ color: 'var(--text-secondary)' }}>
-                      <span className="font-medium" style={{ color: 'var(--text-primary)' }}>{c.name}</span>
-                      <span className="ml-1">— {c.role}</span>
+                <button
+                  onClick={() => addOutlineCharacter({ name: '', role: '', description: '', gender: 'other' })}
+                  className="text-[10px] px-1.5 py-0.5 rounded"
+                  style={{ color: 'var(--accent)', background: 'var(--accent-dim)' }}
+                >+ 添加</button>
+              </div>
+              <div className="space-y-2">
+                {outline.characters.map((c, i) => (
+                  <div key={i} className="p-2 rounded-lg space-y-1.5" style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border)' }}>
+                    <div className="flex gap-1.5">
+                      <input
+                        value={c.name}
+                        onChange={(e) => updateOutlineCharacter(i, 'name', e.target.value)}
+                        placeholder="名字"
+                        className="flex-1 px-2 py-1 rounded text-[11px]"
+                        style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+                      />
+                      <input
+                        value={c.role}
+                        onChange={(e) => updateOutlineCharacter(i, 'role', e.target.value)}
+                        placeholder="角色定位"
+                        className="flex-1 px-2 py-1 rounded text-[11px]"
+                        style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+                      />
+                      <button
+                        onClick={() => { if (confirm(`删除角色「${c.name || '未命名'}」？`)) removeOutlineCharacter(i); }}
+                        className="px-1.5 rounded text-[11px]"
+                        style={{ color: '#ef4444' }}
+                        title="删除"
+                      >×</button>
+                    </div>
+                    <textarea
+                      value={c.description}
+                      onChange={(e) => updateOutlineCharacter(i, 'description', e.target.value)}
+                      placeholder="角色描述..."
+                      rows={1}
+                      className="w-full px-2 py-1 rounded text-[11px] resize-none"
+                      style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Plot Points */}
+            {(outline.plotPoints || []).length > 0 && (
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>情节点</span>
+                  <button
+                    onClick={() => addOutlinePlotPoint({ id: uuid(), title: '', description: '' })}
+                    className="text-[10px] px-1.5 py-0.5 rounded"
+                    style={{ color: 'var(--accent)', background: 'var(--accent-dim)' }}
+                  >+ 添加</button>
+                </div>
+                <div className="space-y-2">
+                  {(outline.plotPoints || []).map((p, i) => (
+                    <div key={p.id || i} className="p-2 rounded-lg space-y-1.5" style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border)' }}>
+                      <div className="flex gap-1.5 items-center">
+                        <span className="text-[10px] font-mono w-5 text-center flex-shrink-0" style={{ color: 'var(--text-muted)' }}>{i + 1}</span>
+                        <input
+                          value={p.title}
+                          onChange={(e) => updateOutlinePlotPoint(i, 'title', e.target.value)}
+                          placeholder="标题"
+                          className="flex-1 px-2 py-1 rounded text-[11px]"
+                          style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+                        />
+                        <button
+                          onClick={() => { if (confirm(`删除情节点「${p.title || '未命名'}」？`)) removeOutlinePlotPoint(i); }}
+                          className="px-1.5 rounded text-[11px]"
+                          style={{ color: '#ef4444' }}
+                        >×</button>
+                      </div>
+                      <textarea
+                        value={p.description}
+                        onChange={(e) => updateOutlinePlotPoint(i, 'description', e.target.value)}
+                        placeholder="描述..."
+                        rows={2}
+                        className="w-full px-2 py-1 rounded text-[11px] resize-none"
+                        style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+                      />
                     </div>
                   ))}
                 </div>
               </div>
             )}
-            {outline.endings && outline.endings.length > 0 && (
-              <div>
-                <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>结局</span>
-                <div className="mt-1 flex flex-wrap gap-1">
-                  {outline.endings.map((e, i) => {
-                    const typeColors: Record<string, string> = { best: '#22c55e', good: '#3b82f6', normal: '#a78bfa', bad: '#ef4444', hidden: '#f59e0b' };
-                    return (
-                      <span
-                        key={i}
-                        className="text-[10px] px-1.5 py-0.5 rounded"
-                        style={{ background: `${typeColors[e.type] || '#888'}20`, color: typeColors[e.type] || '#888' }}
-                      >
-                        {e.type} · {e.title}
-                      </span>
-                    );
-                  })}
-                </div>
+            {(outline.plotPoints || []).length === 0 && (
+              <div className="flex items-center justify-between">
+                <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>暂无情节点</span>
+                <button
+                  onClick={() => addOutlinePlotPoint({ id: uuid(), title: '', description: '' })}
+                  className="text-[10px] px-1.5 py-0.5 rounded"
+                  style={{ color: 'var(--accent)', background: 'var(--accent-dim)' }}
+                >+ 添加</button>
               </div>
             )}
-          </>
+
+            {/* Endings */}
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>结局</span>
+                <button
+                  onClick={() => addOutlineEnding({ id: uuid(), title: '', type: 'normal', description: '' })}
+                  className="text-[10px] px-1.5 py-0.5 rounded"
+                  style={{ color: 'var(--accent)', background: 'var(--accent-dim)' }}
+                >+ 添加</button>
+              </div>
+              <div className="space-y-2">
+                {(outline.endings || []).map((e, i) => {
+                  const typeColors: Record<string, string> = { best: '#22c55e', good: '#3b82f6', normal: '#a78bfa', bad: '#ef4444', hidden: '#f59e0b' };
+                  return (
+                    <div key={e.id || i} className="p-2 rounded-lg space-y-1.5" style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border)' }}>
+                      <div className="flex gap-1.5 items-center">
+                        <select
+                          value={e.type}
+                          onChange={(ev) => updateOutlineEnding(i, 'type', ev.target.value)}
+                          className="text-[10px] px-1.5 py-1 rounded"
+                          style={{ background: `${typeColors[e.type] || '#888'}20`, color: typeColors[e.type] || '#888', border: 'none', fontWeight: 600 }}
+                        >
+                          <option value="best">best</option>
+                          <option value="good">good</option>
+                          <option value="normal">normal</option>
+                          <option value="bad">bad</option>
+                          <option value="hidden">hidden</option>
+                        </select>
+                        <input
+                          value={e.title}
+                          onChange={(ev) => updateOutlineEnding(i, 'title', ev.target.value)}
+                          placeholder="结局标题"
+                          className="flex-1 px-2 py-1 rounded text-[11px]"
+                          style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+                        />
+                        <button
+                          onClick={() => { if (confirm(`删除结局「${e.title || '未命名'}」？`)) removeOutlineEnding(i); }}
+                          className="px-1.5 rounded text-[11px]"
+                          style={{ color: '#ef4444' }}
+                        >×</button>
+                      </div>
+                      <textarea
+                        value={e.description}
+                        onChange={(ev) => updateOutlineEnding(i, 'description', ev.target.value)}
+                        placeholder="结局描述..."
+                        rows={2}
+                        className="w-full px-2 py-1 rounded text-[11px] resize-none"
+                        style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
         ) : (
-          <p className="text-xs" style={{ color: 'var(--text-muted)' }}>尚未生成大纲</p>
+          <div className="flex flex-col items-center gap-2 py-3">
+            <p className="text-xs" style={{ color: 'var(--text-muted)' }}>尚未生成大纲</p>
+            <button
+              onClick={() => useChatStore.getState().setOutline({
+                theme: '', worldView: '', tone: '', depth: 5,
+                characters: [], plotPoints: [], endings: [],
+              })}
+              className="text-xs px-4 py-1.5 rounded-lg"
+              style={{ background: 'var(--accent)', color: 'white' }}
+            >
+              手动创建大纲
+            </button>
+          </div>
         )}
       </Section>
 
@@ -419,14 +591,14 @@ export default function StoryConfigPanel() {
       <Section title="主体管理" icon="👤" defaultOpen={true}>
         {entities ? (
           <>
-            {/* Tab bar */}
+            {/* Tab bar + add button */}
             <div className="flex gap-1 mb-3">
               {(['characters', 'scenes', 'props'] as const).map((tab) => {
                 const count = entities[tab]?.length || 0;
                 return (
                   <button
                     key={tab}
-                    onClick={() => setEntityTab(tab)}
+                    onClick={() => { setEntityTab(tab); setAddingEntity(false); }}
                     className="flex-1 text-xs py-1.5 rounded-lg transition-colors"
                     style={{
                       background: entityTab === tab ? 'var(--accent-dim)' : 'var(--bg-tertiary)',
@@ -438,7 +610,67 @@ export default function StoryConfigPanel() {
                   </button>
                 );
               })}
+              <button
+                onClick={() => { setAddingEntity(!addingEntity); setNewEntityName(''); setNewEntityDesc(''); }}
+                className="w-8 text-sm rounded-lg flex items-center justify-center"
+                style={{ background: 'var(--bg-tertiary)', color: 'var(--accent)' }}
+                title={`添加${entityTabLabels[entityTab]}`}
+              >+</button>
             </div>
+
+            {/* Inline add form */}
+            {addingEntity && (
+              <div className="mb-3 p-2.5 rounded-lg space-y-2" style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--accent-dim)' }}>
+                <input
+                  value={newEntityName}
+                  onChange={(e) => setNewEntityName(e.target.value)}
+                  placeholder="名称"
+                  className="w-full px-2 py-1.5 rounded text-xs"
+                  style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+                  autoFocus
+                />
+                <textarea
+                  value={newEntityDesc}
+                  onChange={(e) => setNewEntityDesc(e.target.value)}
+                  placeholder="描述"
+                  rows={2}
+                  className="w-full px-2 py-1.5 rounded text-xs resize-none"
+                  style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      if (!newEntityName.trim()) return;
+                      const base = { id: uuid(), name: newEntityName.trim(), description: newEntityDesc.trim(), imagePrompt: '', imageUrl: null };
+                      let entity: any;
+                      if (entityTab === 'characters') {
+                        entity = { ...base, appearance: '', personality: '', gender: 'other' as const, ageRange: '', voiceType: 'narrator' as const };
+                      } else if (entityTab === 'scenes') {
+                        entity = { ...base, mood: '', lighting: '' };
+                      } else {
+                        entity = { ...base, significance: '' };
+                      }
+                      addEntity(entityTab, entity);
+                      setAddingEntity(false);
+                      setNewEntityName('');
+                      setNewEntityDesc('');
+                    }}
+                    disabled={!newEntityName.trim()}
+                    className="flex-1 text-xs py-1.5 rounded-lg"
+                    style={{ background: 'var(--accent)', color: 'white', opacity: newEntityName.trim() ? 1 : 0.4 }}
+                  >
+                    添加
+                  </button>
+                  <button
+                    onClick={() => setAddingEntity(false)}
+                    className="px-3 text-xs py-1.5 rounded-lg"
+                    style={{ background: 'var(--bg-secondary)', color: 'var(--text-muted)' }}
+                  >
+                    取消
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Entity cards */}
             <div className="space-y-2">
@@ -454,6 +686,11 @@ export default function StoryConfigPanel() {
                     handleRegenImage(entityTab, entity.id, entity.imagePrompt, ar);
                   }}
                   onImageClick={(url) => setLightboxImage(url)}
+                  onRemove={() => {
+                    if (confirm(`确定删除「${entity.name}」吗？`)) {
+                      removeEntity(entityTab, entity.id);
+                    }
+                  }}
                 />
               ))}
               {entityList.length === 0 && (
@@ -462,7 +699,16 @@ export default function StoryConfigPanel() {
             </div>
           </>
         ) : (
-          <p className="text-xs" style={{ color: 'var(--text-muted)' }}>尚未提取主体</p>
+          <div className="flex flex-col items-center gap-2 py-3">
+            <p className="text-xs" style={{ color: 'var(--text-muted)' }}>尚未提取主体</p>
+            <button
+              onClick={() => useChatStore.getState().setEntities({ characters: [], scenes: [], props: [] })}
+              className="text-xs px-4 py-1.5 rounded-lg"
+              style={{ background: 'var(--accent)', color: 'white' }}
+            >
+              手动创建主体
+            </button>
+          </div>
         )}
       </Section>
 
@@ -623,13 +869,14 @@ export default function StoryConfigPanel() {
 }
 
 // --- Entity Card Component ---
-function EntityCard({ entity, type, isGenerating, onUpdateField, onRegenImage, onImageClick }: {
+function EntityCard({ entity, type, isGenerating, onUpdateField, onRegenImage, onImageClick, onRemove }: {
   entity: any;
   type: string;
   isGenerating: boolean;
   onUpdateField: (field: string, value: any) => void;
   onRegenImage: () => void;
   onImageClick?: (url: string) => void;
+  onRemove?: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -688,8 +935,29 @@ function EntityCard({ entity, type, isGenerating, onUpdateField, onRegenImage, o
       {/* Expanded edit area */}
       {expanded && (
         <div className="px-2 pb-2 space-y-2" style={{ borderTop: '1px solid var(--border)' }}>
-          {/* Image prompt */}
+          {/* Editable name */}
           <div className="mt-2">
+            <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>名称</span>
+            <input
+              value={entity.name || ''}
+              onChange={(e) => onUpdateField('name', e.target.value)}
+              className="w-full mt-1 px-2 py-1.5 rounded text-[11px]"
+              style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+            />
+          </div>
+          {/* Editable description */}
+          <div>
+            <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>描述</span>
+            <textarea
+              value={entity.description || ''}
+              onChange={(e) => onUpdateField('description', e.target.value)}
+              rows={2}
+              className="w-full mt-1 px-2 py-1.5 rounded text-[11px] resize-none"
+              style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+            />
+          </div>
+          {/* Image prompt */}
+          <div>
             <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>图片提示词</span>
             <textarea
               value={entity.imagePrompt || ''}
@@ -712,6 +980,17 @@ function EntityCard({ entity, type, isGenerating, onUpdateField, onRegenImage, o
           >
             {isGenerating ? '生成中...' : '重新生成图片'}
           </button>
+
+          {/* Delete button */}
+          {onRemove && (
+            <button
+              onClick={onRemove}
+              className="w-full text-[11px] py-1.5 rounded-lg transition-colors"
+              style={{ background: 'rgba(239,68,68,0.1)', color: '#ef4444' }}
+            >
+              删除{type === 'characters' ? '角色' : type === 'scenes' ? '场景' : '道具'}
+            </button>
+          )}
         </div>
       )}
     </div>

@@ -266,20 +266,12 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
     waitingTimerRef.current = onDemandTimer;
   }, [navigateToNode, generateOnDemand]);
 
-  if (!currentNode || !story) {
-    return (
-      <div className="min-h-screen flex items-center justify-center" style={{ color: 'var(--text-muted)' }}>
-        加载中...
-      </div>
-    );
-  }
-
-  const isEnding = currentNode.type === 'ending';
-  const progress = session ? (session.history.length / ((story.nodes?.length || 1) * 0.6)) * 100 : 0;
+  const isEnding = currentNode?.type === 'ending';
 
   // Achievement tracking: two badges per story, each only once, saved to server + localStorage
+  // Must be before any early return to respect React hooks order
   useEffect(() => {
-    if (!isEnding || !story || !session) return;
+    if (!isEnding || !story || !session || !currentNode) return;
 
     const isHidden = currentNode.data.metadata?.endingType === 'hidden'
       || currentNode.data.metadata?.endingType === 'best'
@@ -291,15 +283,23 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
     if (existing[badge]) return; // already marked
 
     const updated = { ...existing, [badge]: true };
-    // Save to localStorage (offline fallback)
     localStorage.setItem(`achievements_${story.id}`, JSON.stringify(updated));
-    // Save to server
     fetch(`/api/sessions/${session.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ achievements: updated }),
     }).catch(() => {});
   }, [isEnding, story, session, currentNode]);
+
+  if (!currentNode || !story) {
+    return (
+      <div className="min-h-screen flex items-center justify-center" style={{ color: 'var(--text-muted)' }}>
+        加载中...
+      </div>
+    );
+  }
+
+  const progress = session ? (session.history.length / ((story.nodes?.length || 1) * 0.6)) * 100 : 0;
 
   return (
     <div
@@ -443,9 +443,24 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
           </div>
         )}
 
+        {/* Speaker label for character segments */}
+        {voiceSegments[currentSegmentIndex]?.speaker &&
+         voiceSegments[currentSegmentIndex].speaker !== 'narrator' && (
+          <span
+            className="text-xs font-medium px-2 py-0.5 rounded mb-2 inline-block"
+            style={{ background: 'var(--accent-dim)', color: 'var(--accent)' }}
+          >
+            {voiceSegments[currentSegmentIndex].speaker}
+          </span>
+        )}
         <p
           className={`text-sm leading-relaxed ${isTyping ? 'cursor-blink' : ''}`}
-          style={{ color: 'var(--text-primary)' }}
+          style={{
+            color: 'var(--text-primary)',
+            fontStyle: voiceSegments[currentSegmentIndex]?.speaker && voiceSegments[currentSegmentIndex].speaker !== 'narrator' ? 'italic' : 'normal',
+            borderLeft: voiceSegments[currentSegmentIndex]?.speaker && voiceSegments[currentSegmentIndex].speaker !== 'narrator' ? '2px solid var(--accent)' : 'none',
+            paddingLeft: voiceSegments[currentSegmentIndex]?.speaker && voiceSegments[currentSegmentIndex].speaker !== 'narrator' ? 12 : 0,
+          }}
         >
           {displayedText}
         </p>

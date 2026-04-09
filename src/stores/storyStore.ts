@@ -52,6 +52,11 @@ interface StoryState {
   addFrame: (nodeId: string, frame: Frame) => void;
   removeFrame: (nodeId: string, frameId: string) => void;
 
+  // Voice segment operations
+  addVoiceSegment: (nodeId: string, segment: import('@/types/story').VoiceSegment) => void;
+  removeVoiceSegment: (nodeId: string, segIndex: number) => void;
+  updateVoiceSegment: (nodeId: string, segIndex: number, updates: Partial<import('@/types/story').VoiceSegment>) => void;
+
   // Undo / Redo
   undo: () => void;
   redo: () => void;
@@ -406,6 +411,58 @@ export const useStoryStore = create<StoryState>()(persist((set, get) => ({
         updatedAt: new Date().toISOString(),
       },
       ...hist,
+    });
+  },
+
+  addVoiceSegment: (nodeId, segment) => {
+    const { story } = get();
+    if (!story) return;
+    const hist = pushHistory(get());
+    set({
+      story: {
+        ...story,
+        nodes: (story.nodes || []).map((n) =>
+          n.id === nodeId
+            ? { ...n, data: { ...n.data, voiceSegments: [...(n.data.voiceSegments || []), segment] } }
+            : n
+        ),
+        updatedAt: new Date().toISOString(),
+      },
+      ...hist,
+    });
+  },
+
+  removeVoiceSegment: (nodeId, segIndex) => {
+    const { story } = get();
+    if (!story) return;
+    const hist = pushHistory(get());
+    set({
+      story: {
+        ...story,
+        nodes: (story.nodes || []).map((n) =>
+          n.id === nodeId
+            ? { ...n, data: { ...n.data, voiceSegments: (n.data.voiceSegments || []).filter((_, i) => i !== segIndex) } }
+            : n
+        ),
+        updatedAt: new Date().toISOString(),
+      },
+      ...hist,
+    });
+  },
+
+  updateVoiceSegment: (nodeId, segIndex, updates) => {
+    const { story } = get();
+    if (!story) return;
+    set({
+      story: {
+        ...story,
+        nodes: (story.nodes || []).map((n) =>
+          n.id === nodeId
+            ? { ...n, data: { ...n.data, voiceSegments: (n.data.voiceSegments || []).map((s, i) => i === segIndex ? { ...s, ...updates } : s) } }
+            : n
+        ),
+        updatedAt: new Date().toISOString(),
+      },
     });
   },
 

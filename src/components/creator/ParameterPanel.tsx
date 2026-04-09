@@ -37,8 +37,11 @@ export default function ParameterPanel() {
   const updateChoice = useStoryStore((s) => s.updateChoice);
   const removeChoice = useStoryStore((s) => s.removeChoice);
   const removeNode = useStoryStore((s) => s.removeNode);
+  const addVoiceSegment = useStoryStore((s) => s.addVoiceSegment);
+  const removeVoiceSegment = useStoryStore((s) => s.removeVoiceSegment);
   const selectedNodeId = useEditorStore((s) => s.selectedNodeId);
   const paramPanelOpen = useEditorStore((s) => s.paramPanelOpen);
+  const entities = useChatStore((s) => s.orchestrator.entities);
   const setParamPanelOpen = useEditorStore((s) => s.setParamPanelOpen);
   const selectNode = useEditorStore((s) => s.selectNode);
 
@@ -53,12 +56,23 @@ export default function ParameterPanel() {
   const [isBatchGenerating, setIsBatchGenerating] = useState(false);
   const [batchProgress, setBatchProgress] = useState('');
 
+  const [uploadingFrameId, setUploadingFrameId] = useState<string | null>(null);
+
   // Voice segment editing: track local edits to detect dirty state
   const [segmentEdits, setSegmentEdits] = useState<Record<string, { emotion?: string; speed?: number; text?: string }>>({});
   const [regeneratingSegId, setRegeneratingSegId] = useState<string | null>(null);
 
-  // Reset active tab and segment edits when node changes
-  useEffect(() => { setActiveFrameTab(0); setSegmentEdits({}); }, [selectedNodeId]);
+  // Reset ALL local state when switching nodes
+  useEffect(() => {
+    setActiveFrameTab(0);
+    setSegmentEdits({});
+    setNewChoiceText('');
+    setGeneratingFrameId(null);
+    setFrameProgress('');
+    setIsBatchGenerating(false);
+    setBatchProgress('');
+    setLightboxImage(null);
+  }, [selectedNodeId]);
 
   const handleClose = useCallback(() => {
     setParamPanelOpen(false);
@@ -164,6 +178,22 @@ export default function ParameterPanel() {
       duration: 3,
     });
   }, [node, addFrame]);
+
+  // Upload local image for a frame
+  const handleUploadFrameImage = useCallback(async (frameId: string, file: File) => {
+    if (!node) return;
+    setUploadingFrameId(frameId);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const res = await fetch('/api/upload', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (data.url) {
+        updateFrame(node.id, frameId, { imageUrl: data.url });
+      }
+    } catch { /* silent */ }
+    setUploadingFrameId(null);
+  }, [node, updateFrame]);
 
   const handleAddChoice = useCallback(() => {
     if (!node || !newChoiceText.trim()) return;
@@ -325,14 +355,26 @@ export default function ParameterPanel() {
                       className="w-full aspect-video object-cover cursor-pointer"
                       onClick={() => setLightboxImage(frame.imageUrl)}
                     />
-                    <button
-                      onClick={() => handleGenerateFrameImage(frame)}
-                      disabled={generatingFrameId !== null || isBatchGenerating}
-                      className="absolute bottom-1.5 right-1.5 text-[10px] px-2 py-0.5 rounded"
-                      style={{ background: 'rgba(0,0,0,0.7)', color: 'white' }}
-                    >
-                      {generatingFrameId === frame.id ? '生成中...' : '重新生成'}
-                    </button>
+                    <div className="absolute bottom-1.5 right-1.5 flex gap-1">
+                      <label
+                        className="text-[10px] px-2 py-0.5 rounded cursor-pointer"
+                        style={{ background: 'rgba(0,0,0,0.7)', color: 'white' }}
+                      >
+                        {uploadingFrameId === frame.id ? '上传中...' : '上传替换'}
+                        <input
+                          type="file" accept="image/*" className="hidden"
+                          onChange={(e) => { const f = e.target.files?.[0]; if (f) handleUploadFrameImage(frame.id, f); e.target.value = ''; }}
+                        />
+                      </label>
+                      <button
+                        onClick={() => handleGenerateFrameImage(frame)}
+                        disabled={generatingFrameId !== null || isBatchGenerating}
+                        className="text-[10px] px-2 py-0.5 rounded"
+                        style={{ background: 'rgba(0,0,0,0.7)', color: 'white' }}
+                      >
+                        {generatingFrameId === frame.id ? '生成中...' : 'AI生成'}
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   <div
@@ -342,14 +384,26 @@ export default function ParameterPanel() {
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" strokeWidth="1.5">
                       <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="m21 15-5-5L5 21" />
                     </svg>
-                    <button
-                      onClick={() => handleGenerateFrameImage(frame)}
-                      disabled={generatingFrameId !== null || !frame.imagePrompt}
-                      className="text-[10px] px-3 py-1 rounded-md disabled:opacity-30"
-                      style={{ background: 'var(--accent)', color: 'white' }}
-                    >
-                      {generatingFrameId === frame.id ? (frameProgress || '生成中...') : '生成图片'}
-                    </button>
+                    <div className="flex gap-2">
+                      <label
+                        className="text-[10px] px-3 py-1 rounded-md cursor-pointer"
+                        style={{ border: '1px solid var(--border)', color: 'var(--text-secondary)' }}
+                      >
+                        {uploadingFrameId === frame.id ? '上传中...' : '上传图片'}
+                        <input
+                          type="file" accept="image/*" className="hidden"
+                          onChange={(e) => { const f = e.target.files?.[0]; if (f) handleUploadFrameImage(frame.id, f); e.target.value = ''; }}
+                        />
+                      </label>
+                      <button
+                        onClick={() => handleGenerateFrameImage(frame)}
+                        disabled={generatingFrameId !== null || isBatchGenerating || !frame.imagePrompt}
+                        className="text-[10px] px-3 py-1 rounded-md disabled:opacity-30"
+                        style={{ background: 'var(--accent)', color: 'white' }}
+                      >
+                        {generatingFrameId === frame.id ? (frameProgress || '生成中...') : 'AI生成'}
+                      </button>
+                    </div>
                   </div>
                 )}
 
@@ -384,12 +438,64 @@ export default function ParameterPanel() {
                     />
                   </details>
 
+                  {/* Entity refs for this frame */}
+                  <div>
+                    <span className="text-[9px] font-medium block mb-1" style={{ color: 'var(--text-muted)' }}>引用主体</span>
+                    <div className="flex flex-wrap gap-1">
+                      {(frame.entityRefs || []).map((refId: string) => {
+                        const allEntities = [
+                          ...(entities?.characters || []),
+                          ...(entities?.scenes || []),
+                          ...(entities?.props || []),
+                        ];
+                        const entity = allEntities.find((e: any) => e.id === refId);
+                        return (
+                          <span key={refId} className="inline-flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded"
+                            style={{ background: 'var(--bg-primary)', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}>
+                            {entity?.name || refId.slice(0, 8)}
+                            <button
+                              onClick={() => updateFrame(node.id, frame.id, { entityRefs: (frame.entityRefs || []).filter((r: string) => r !== refId) })}
+                              className="ml-0.5" style={{ color: 'var(--text-muted)' }}>✕</button>
+                          </span>
+                        );
+                      })}
+                      <select
+                        value=""
+                        onChange={(e) => {
+                          if (!e.target.value) return;
+                          const current = frame.entityRefs || [];
+                          if (!current.includes(e.target.value)) {
+                            updateFrame(node.id, frame.id, { entityRefs: [...current, e.target.value] });
+                          }
+                          e.target.value = '';
+                        }}
+                        className="text-[10px] px-1 py-0.5 rounded"
+                        style={{ background: 'var(--bg-primary)', color: 'var(--accent)', border: '1px dashed var(--border)' }}
+                      >
+                        <option value="">+ 添加</option>
+                        {[...(entities?.characters || []), ...(entities?.scenes || []), ...(entities?.props || [])]
+                          .filter((e: any) => !(frame.entityRefs || []).includes(e.id))
+                          .map((e: any) => (
+                            <option key={e.id} value={e.id}>{e.name}{e.imageUrl ? ' ✓' : ''}</option>
+                          ))
+                        }
+                      </select>
+                    </div>
+                  </div>
+
                   {/* Voice segments for this frame */}
-                  {frameSegs.length > 0 && (
-                    <div>
-                      <span className="text-[9px] font-medium block mb-1" style={{ color: 'var(--text-muted)' }}>
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[9px] font-medium" style={{ color: 'var(--text-muted)' }}>
                         配音 ({frameSegs.length} 段)
                       </span>
+                      <button
+                        onClick={() => addVoiceSegment(node.id, { id: uuid(), text: '', speaker: 'narrator', voiceType: 'narrator', emotion: 'neutral', speed: 1.0, audioUrl: null })}
+                        className="text-[9px] px-1.5 py-0.5 rounded"
+                        style={{ color: 'var(--accent)', background: 'var(--accent-dim)' }}
+                      >+ 添加</button>
+                    </div>
+                    {frameSegs.length > 0 && (
                       <div className="space-y-1.5">
                         {frameSegs.map(({ seg, globalIndex }) => {
                           const segId = seg.id || `seg-${globalIndex}`;
@@ -409,20 +515,36 @@ export default function ParameterPanel() {
                                 border: `1px solid ${isDirty ? 'var(--warning)' : 'var(--border)'}`,
                               }}
                             >
-                              {/* Top row: speaker + status */}
+                              {/* Top row: speaker + status + delete */}
                               <div className="flex items-center gap-1.5 mb-1">
-                                <span
+                                <select
+                                  value={seg.speaker}
+                                  onChange={(e) => {
+                                    const updated = [...(node.data.voiceSegments || [])];
+                                    updated[globalIndex] = { ...updated[globalIndex], speaker: e.target.value };
+                                    updateNode(node.id, { voiceSegments: updated });
+                                  }}
                                   className="text-[9px] font-medium px-1.5 py-px rounded"
                                   style={{
                                     background: seg.speaker === 'narrator' ? 'var(--bg-tertiary)' : 'var(--accent-dim)',
                                     color: seg.speaker === 'narrator' ? 'var(--text-muted)' : 'var(--accent)',
+                                    border: 'none',
                                   }}
                                 >
-                                  {seg.speaker === 'narrator' ? '旁白' : seg.speaker}
-                                </span>
+                                  <option value="narrator">旁白</option>
+                                  {entities?.characters?.filter((c: any) => c.name !== '旁白').map((c: any) => (
+                                    <option key={c.id} value={c.name}>{c.name}</option>
+                                  ))}
+                                </select>
                                 <span className="flex-1" />
                                 {isDirty && <span className="text-[9px]" style={{ color: 'var(--warning)' }}>已修改</span>}
                                 {seg.audioUrl && !isDirty && <span className="text-[9px]" style={{ color: 'var(--success)' }}>♪</span>}
+                                <button
+                                  onClick={() => removeVoiceSegment(node.id, globalIndex)}
+                                  className="text-[10px] px-1 rounded"
+                                  style={{ color: 'var(--danger)' }}
+                                  title="删除配音段"
+                                >×</button>
                               </div>
 
                               {/* Emotion + Speed inline */}
@@ -470,8 +592,8 @@ export default function ParameterPanel() {
                           );
                         })}
                       </div>
-                    </div>
-                  )}
+                    )}
+                  </div>
                 </div>
 
                 {/* Frame footer actions */}
@@ -493,9 +615,16 @@ export default function ParameterPanel() {
           })()}
 
           {/* Orphan voice segments (when no frames exist) */}
-          {frames.length === 0 && voiceSegs.length > 0 && (
+          {frames.length === 0 && (
             <div className="space-y-1.5">
-              <span className="text-[9px] font-medium block" style={{ color: 'var(--text-muted)' }}>配音分段 ({voiceSegs.length})</span>
+              <div className="flex items-center justify-between">
+                <span className="text-[9px] font-medium" style={{ color: 'var(--text-muted)' }}>配音分段 ({voiceSegs.length})</span>
+                <button
+                  onClick={() => addVoiceSegment(node.id, { id: uuid(), text: '', speaker: 'narrator', voiceType: 'narrator', emotion: 'neutral', speed: 1.0, audioUrl: null })}
+                  className="text-[9px] px-1.5 py-0.5 rounded"
+                  style={{ color: 'var(--accent)', background: 'var(--accent-dim)' }}
+                >+ 添加</button>
+              </div>
               {voiceSegs.map((seg, i) => {
                 const segId = seg.id || `seg-${i}`;
                 const edits = segmentEdits[segId] || {};
@@ -504,11 +633,29 @@ export default function ParameterPanel() {
                 return (
                   <div key={segId} className="rounded-md p-2" style={{ background: 'var(--bg-tertiary)', border: `1px solid ${isDirty ? 'var(--warning)' : 'var(--border)'}` }}>
                     <div className="flex items-center gap-1.5 mb-1">
-                      <span className="text-[9px] font-medium px-1.5 py-px rounded" style={{ background: 'var(--accent-dim)', color: 'var(--accent)' }}>
-                        {seg.speaker === 'narrator' ? '旁白' : seg.speaker}
-                      </span>
-                      {seg.audioUrl && !isDirty && <span className="text-[9px] ml-auto" style={{ color: 'var(--success)' }}>♪</span>}
-                      {isDirty && <span className="text-[9px] ml-auto" style={{ color: 'var(--warning)' }}>已修改</span>}
+                      <select
+                        value={seg.speaker}
+                        onChange={(e) => {
+                          const updated = [...(node.data.voiceSegments || [])];
+                          updated[i] = { ...updated[i], speaker: e.target.value };
+                          updateNode(node.id, { voiceSegments: updated });
+                        }}
+                        className="text-[9px] font-medium px-1.5 py-px rounded"
+                        style={{ background: 'var(--accent-dim)', color: 'var(--accent)', border: 'none' }}
+                      >
+                        <option value="narrator">旁白</option>
+                        {entities?.characters?.filter((c: any) => c.name !== '旁白').map((c: any) => (
+                          <option key={c.id} value={c.name}>{c.name}</option>
+                        ))}
+                      </select>
+                      <span className="flex-1" />
+                      {seg.audioUrl && !isDirty && <span className="text-[9px]" style={{ color: 'var(--success)' }}>♪</span>}
+                      {isDirty && <span className="text-[9px]" style={{ color: 'var(--warning)' }}>已修改</span>}
+                      <button
+                        onClick={() => removeVoiceSegment(node.id, i)}
+                        className="text-[10px] px-1 rounded"
+                        style={{ color: 'var(--danger)' }}
+                      >×</button>
                     </div>
                     <textarea
                       value={curText}

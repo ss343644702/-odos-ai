@@ -52,7 +52,10 @@ export default function EditorPage() {
       if (storyId === 'new') {
         // Always create a fresh empty story for /editor/new
         initStory('新影游', '');
+        // Clear any stale 'chat-new' data, then force a clean chat state
+        try { localStorage.removeItem('chat-new'); } catch {}
         useChatStore.getState().clearMessages();
+        useChatStore.setState({ currentStoryId: 'new' });
         try {
           const storyState = useStoryStore.getState().story;
           const res = await fetch('/api/stories', {
@@ -72,7 +75,8 @@ export default function EditorPage() {
           const { id } = await res.json();
           if (id) {
             dbStoryId.current = id;
-            // Update URL without triggering a Next.js navigation/remount
+            // Update both URL and chatStore to use real ID
+            useChatStore.setState({ currentStoryId: id });
             window.history.replaceState(null, '', `/editor/${id}`);
           }
         } catch {
@@ -105,6 +109,18 @@ export default function EditorPage() {
           };
           dbStoryId.current = dbStory.id;
           setStory(fullStory);
+          useChatStore.getState().switchProject(storyId);
+          // Backfill chatStore from DB data if localStorage didn't have it
+          const cs = useChatStore.getState();
+          if (!cs.orchestrator.entities && (dbStory.entities || data.entities)) {
+            cs.setEntities(dbStory.entities || data.entities);
+          }
+          if (!cs.orchestrator.outline && data.outline) {
+            cs.setOutline(data.outline);
+          }
+          if (!cs.orchestrator.style && data.style?.styleId) {
+            cs.setSelectedStyle(data.style);
+          }
         } else {
           // Not found in DB — use localStorage if available
           if (!useStoryStore.getState().story) {
@@ -150,8 +166,9 @@ export default function EditorPage() {
                 style: s.style,
                 worldView: s.worldView,
                 playerObjective: s.playerObjective || undefined,
+                outline: useChatStore.getState().orchestrator.outline || undefined,
               },
-              entities: s.entities || undefined,
+              entities: s.entities || useChatStore.getState().orchestrator.entities || undefined,
             }),
           });
         } catch {
@@ -160,8 +177,17 @@ export default function EditorPage() {
       }, 3000);
     });
 
+    // Sync chatStore entities → storyStore whenever they change
+    const unsubChat = useChatStore.subscribe((state) => {
+      const entities = state.orchestrator.entities;
+      if (entities) {
+        useStoryStore.getState().setEntities(entities);
+      }
+    });
+
     return () => {
       unsub();
+      unsubChat();
       if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
     };
   }, [hydrated, storyId]);

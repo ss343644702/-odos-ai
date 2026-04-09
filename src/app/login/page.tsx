@@ -58,7 +58,8 @@ function LoginForm() {
       }
     }
 
-    router.push(nextUrl);
+    // Hard redirect to ensure server sees the new session cookies
+    window.location.href = nextUrl;
   };
 
   const handleResend = useCallback(async () => {
