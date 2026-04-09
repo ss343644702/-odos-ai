@@ -3,7 +3,7 @@ import { callLLM, parseJsonFromResponse } from '@/lib/claude';
 import { sanitizePlayerInput, wrapPlayerInput, moderateContent, sanitizeOutput } from '@/lib/safety';
 import { checkRateLimit, getRateLimitKey, BRANCH_LIMIT } from '@/lib/rate-limit';
 import { synthesizeSpeech } from '@/lib/minimax-tts';
-import { uploadAudio } from '@/lib/oss';
+import { uploadAudio, persistImageUrl } from '@/lib/oss';
 import { submitImageGeneration, pollImageResult } from '@/lib/keling';
 import { getEntityImageList } from '@/lib/entity-utils';
 import { STORYBOARD_SYSTEM_PROMPT, STORYBOARD_USER_PROMPT } from '@/lib/agent/prompts/storyboard';
@@ -18,7 +18,12 @@ const BRANCH_DECISION_PROMPT = `你是一个互动影游的实时剧情推理引
 ## 决策优先级
 1. **世界观校验**: 玩家输入与故事世界观严重不符（如在职场故事中说要飞天、变魔法），返回 reject
 2. **匹配已有选项**: 玩家输入的语义与某个已有选项相近，返回 navigate_existing
-3. **展开玩家的选择**: 这是最常见的情况。围绕玩家的输入展开新的剧情，让玩家的选择产生真实的后果和影响。返回 converge_to_main
+   - **宽松匹配**：只要玩家输入的意图/方向和某个选项类似，就应该匹配，不需要用词完全一样
+   - 例："找到密室" 应该匹配 "打开暗门"（都是探索隐藏空间）
+   - 例："指认凶手" 应该匹配 "说出真相"（都是揭露真相）
+   - 例："向她坦白" 应该匹配 "说出一切"（都是坦诚的意图）
+   - **必须逐个审视所有选项**，不要遗漏任何一个
+3. **展开玩家的选择**: 只有当玩家输入和所有已有选项都不相关时，才走这条路。返回 converge_to_main
 4. **走向结局**: 玩家的选择使得目标不可能达成或已经达成。返回 route_to_ending
 
 ## 核心原则：先展开，再收束
@@ -71,20 +76,32 @@ const BRANCH_DECISION_PROMPT = `你是一个互动影游的实时剧情推理引
   ]
 }
 
-## narration 写作要求
+## narration 写作铁律
 - 使用第二人称"你"视角
-- **100-150字**，简洁有力
-- **前半段**: 直接描述玩家输入的行为和即时反应
-- **后半段**: 描述这个行为带来的后果和新的情境
-- **像人说话**：用具体画面描写，禁止"命运的齿轮"、"暗流涌动"等AI套话，不堆砌形容词
-- **禁止**直接叙述"你回到了主线/原来的剧情"这类 meta 描述
-- **严禁引用玩家尚未遇到的角色或事件**。只能提及当前场景和"近期剧情经历"中出现过的角色
+- **80-120字**，短=精炼
+- **结构**：
+  1. 第一句：上一步选择的**直接结果**（具体发生了什么，不是抽象描述）
+  2. 中间：结果引发的**连锁反应**（角色态度变化、新信息暴露、局势逆转）
+  3. 最后：新的**两难局面**（为选项铺垫）
+- ❌ 禁止：排比句、空洞形容词、比喻堆砌、内心OS（"你感到不安"）、AI套话
+- ✅ 用动作写心理、用细节写人物、用对话推剧情
+- ❌ "你决定调查仓库。仓库里很黑，你小心翼翼地走了进去。"（平淡无后果）
+- ✅ "你踹开仓库门。地上有拖拽痕迹，还有陈雅的围巾。手机突然响了，陌生号码。"（有发现有转折）
+- **严禁引用玩家尚未遇到的角色或事件**
 
-## choices 要求
-- 生成**恰好 2 个选项**，每个都要有具体的动作描述
-- **branch（1个）**: 在当前新情境下继续探索
-- **converge（1个）**: 附带 converge_narration（50-100字），描述从当前场景过渡到目标主线节点的**开头**
-- 不要生成 ending 类型选项（结局通过 action=route_to_ending 触发，不通过选项）
+## choices 要求（极重要）
+- 恰好 **2 个选项**，每个必须是**具体的行动**（不是方向/态度）
+- 两个选项必须导向**不同的后果**——选了A就回不了B的路
+  ✅ "把证据交给警察" / "烧掉那封信"（两条不可逆的路）
+  ✅ "撬开保险箱" / "假装什么都没看见"
+  ❌ "继续调查" / "先观察"（太模糊）
+  ❌ "勇敢面对" / "谨慎行事"（态度不是行动）
+- **branch（1个）**: 在当前情境下的具体行动
+- **converge（1个）**: 具体行动 + converge_narration（50-80字）过渡到主线
+- **converge 选项也必须是具体行动**，不能是"回到主线"这种 meta 表述
+  ✅ "把线索带回去找陈雅核实"（自然导向主线）
+  ❌ "回到故事主线"（meta，破坏沉浸感）
+- 后续 narration 必须让玩家**感受到选择的后果**
 - 选项文字用简洁动作短语，不加"我"字开头`;
 
 /**
@@ -122,6 +139,7 @@ export async function POST(request: NextRequest) {
     entities,
     defaultVoice,
     currentNodeContext,
+    constrainIntents,
   } = body;
 
   const sanitized = sanitizePlayerInput(playerInput);
@@ -185,6 +203,15 @@ export async function POST(request: NextRequest) {
           (history || []).slice(-5).map((h: any) => `- ${h.choiceText || h.nodeTitle || h.nodeId}`).join('\n') || '(刚开始游戏)',
           ``,
         ]),
+        // Intent constraint injection
+        ...(constrainIntents && Array.isArray(constrainIntents) && constrainIntents.length > 0 ? [
+          `## ⚠️ 意图限制（最高优先级）`,
+          `该节点限制了自由输入方向。玩家输入必须与以下选项之一的意图接近：`,
+          ...constrainIntents.map((t: string, i: number) => `${i + 1}. ${t}`),
+          `如果玩家输入「${safeInput}」与以上所有选项的意图都不接近，必须 reject，message 设为"这不是一个好的选择，再想想吧"`,
+          `只有意图方向大致匹配才允许通过（不要求完全一致，允许合理延伸）`,
+          ``,
+        ] : []),
         `## 当前节点已有的选项（供 navigate_existing 匹配）`,
         (existingChoices || []).map((c: any) => `- [${c.id}] ${c.text} → ${c.targetNodeId}`).join('\n') || '(无)',
         ``,
@@ -208,7 +235,7 @@ export async function POST(request: NextRequest) {
         `4. **结局判断基于玩家目标**：只有当目标彻底失败/达成/被放弃时才触发结局，优先匹配已有结局`,
         `5. **严禁引用玩家尚未遇到的角色或事件**。narration 和选项中只能出现：当前场景中的角色、玩家此前经历中提到的角色。主线剧情结构仅用于选择 convergenceNodeId，不要在叙述中剧透后续剧情`,
       ].filter(Boolean).join('\n'),
-      temperature: 0.6,
+      temperature: 0.5,
       maxTokens: 2048,
     });
 
@@ -561,16 +588,17 @@ export async function POST(request: NextRequest) {
             if (!frame.imagePrompt) { console.log('[IMG] skip: no imagePrompt'); return; }
             console.log(`[IMG] generating for frame ${frame.id}, prompt: ${frame.imagePrompt.slice(0, 80)}...`);
             const imageList = entities ? getEntityImageList(entities, (frame as any).entityRefs, newNode.data.character) : [];
+            console.log(`[IMG] entities=${!!entities}, entityRefs=${JSON.stringify((frame as any).entityRefs)}, character=${newNode.data.character}, imageListCount=${imageList.length}`);
             const taskId = await submitImageGeneration({
               prompt: frame.imagePrompt,
-              model_name: 'kling-v1',
+              model_name: 'kling-image-o1',
               aspect_ratio: '16:9',
               image_list: imageList.length > 0 ? imageList : undefined,
             });
             console.log(`[IMG] submitted taskId=${taskId}`);
-            const result = await pollImageResult(taskId, { maxAttempts: 15, initialDelay: 3000, endpoint: '/v1/images/generations' });
+            const result = await pollImageResult(taskId, { maxAttempts: 15, initialDelay: 3000, endpoint: '/v1/images/omni-image' });
             console.log(`[IMG] result: status=${result.status}, hasUrl=${!!result.imageUrl}`);
-            if (result.imageUrl) frame.imageUrl = result.imageUrl;
+            if (result.imageUrl) frame.imageUrl = await persistImageUrl(result.imageUrl);
           } catch (err: any) { console.error(`[IMG] error: ${err.message}`); }
         }),
       ),

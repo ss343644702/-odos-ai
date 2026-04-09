@@ -6,8 +6,10 @@ import { usePathname } from 'next/navigation';
 export default function BottomTabBar() {
   const pathname = usePathname();
 
-  // Hide on play pages (full-screen immersive)
+  // Hide on full-screen pages
   if (pathname.startsWith('/play')) return null;
+  if (pathname.startsWith('/profile/drafts')) return null;
+  if (pathname.startsWith('/settings')) return null;
 
   const isDiscover = pathname === '/discover' || pathname.startsWith('/discover/');
   const isProfile = pathname === '/profile' || pathname.startsWith('/profile/');
@@ -16,7 +18,7 @@ export default function BottomTabBar() {
     <nav
       className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-[430px] h-16 flex items-center justify-around z-50"
       style={{
-        background: 'rgba(12, 12, 16, 0.95)',
+        background: 'rgba(245, 244, 237, 0.9)',
         backdropFilter: 'blur(20px)',
         borderTop: '1px solid var(--border)',
       }}

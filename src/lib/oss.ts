@@ -39,3 +39,21 @@ export async function uploadFile(buffer: Buffer, filename: string, contentType: 
   });
   return result.url;
 }
+
+/**
+ * Download image from a temporary URL (e.g. Keling CDN) and re-upload to OSS for permanent storage.
+ * Returns the permanent OSS URL. If download/upload fails, returns the original URL as fallback.
+ */
+export async function persistImageUrl(sourceUrl: string): Promise<string> {
+  try {
+    const res = await fetch(sourceUrl);
+    if (!res.ok) return sourceUrl;
+    const contentType = res.headers.get('content-type') || 'image/jpeg';
+    const buffer = Buffer.from(await res.arrayBuffer());
+    const ext = contentType.includes('png') ? 'png' : 'jpg';
+    const key = `frames/${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    return await uploadFile(buffer, key, contentType);
+  } catch {
+    return sourceUrl; // fallback: return original URL
+  }
+}

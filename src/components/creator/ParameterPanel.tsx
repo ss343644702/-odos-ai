@@ -268,7 +268,7 @@ export default function ParameterPanel() {
     <div
       className="fixed top-14 right-0 bottom-0 w-80 overflow-y-auto z-40"
       style={{
-        background: 'rgba(18, 18, 26, 0.95)',
+        background: 'rgba(242, 241, 237, 0.95)',
         borderLeft: '1px solid var(--border)',
         backdropFilter: 'blur(12px)',
         animation: 'slideInRight 0.2s ease-out',
@@ -277,7 +277,7 @@ export default function ParameterPanel() {
       {/* Header */}
       <div
         className="sticky top-0 flex items-center justify-between px-4 py-3 z-10"
-        style={{ background: 'rgba(18, 18, 26, 0.95)', borderBottom: '1px solid var(--border)' }}
+        style={{ background: 'rgba(242, 241, 237, 0.95)', borderBottom: '1px solid var(--border)' }}
       >
         <div className="flex items-center gap-2">
           <span className="text-[10px] font-bold px-2 py-0.5 rounded" style={{ background: `${color}20`, color }}>{label}</span>
@@ -792,6 +792,73 @@ export default function ParameterPanel() {
                   />
                 </button>
               </div>
+
+              {/* Constrain intents — only when allowCustomInput is on */}
+              {node.data.allowCustomInput && (
+                <div className="pt-2 mt-1" style={{ borderTop: '1px solid var(--border)' }}>
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>限制自由输入意图</label>
+                    <button
+                      onClick={() => updateNode(node.id, { constrainIntents: !node.data.constrainIntents })}
+                      className="relative rounded-full transition-colors"
+                      style={{
+                        width: 36,
+                        height: 20,
+                        background: node.data.constrainIntents ? 'var(--accent)' : 'var(--bg-tertiary)',
+                        border: `1px solid ${node.data.constrainIntents ? 'var(--accent)' : 'var(--border)'}`,
+                      }}
+                    >
+                      <span
+                        className="absolute rounded-full transition-all"
+                        style={{ width: 14, height: 14, top: 2, left: node.data.constrainIntents ? 18 : 2, background: 'white' }}
+                      />
+                    </button>
+                  </div>
+
+                  {node.data.constrainIntents && (node.data.choices || []).length > 0 && (
+                    <div className="mt-2 space-y-1">
+                      <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>允许的意图方向（多选）</span>
+                      {(node.data.choices || []).map((choice, i) => {
+                        const selected = (node.data.constrainIntentChoiceIds || []).includes(choice.id);
+                        return (
+                          <button
+                            key={choice.id}
+                            onClick={() => {
+                              const current = node.data.constrainIntentChoiceIds || [];
+                              const next = selected
+                                ? current.filter((id: string) => id !== choice.id)
+                                : [...current, choice.id];
+                              updateNode(node.id, { constrainIntentChoiceIds: next });
+                            }}
+                            className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left text-[11px] transition-colors"
+                            style={{
+                              background: selected ? 'var(--accent-dim)' : 'var(--bg-tertiary)',
+                              border: `1px solid ${selected ? 'var(--accent)' : 'var(--border)'}`,
+                              color: 'var(--text-primary)',
+                            }}
+                          >
+                            <span
+                              className="w-4 h-4 rounded flex items-center justify-center flex-shrink-0"
+                              style={{
+                                background: selected ? 'var(--accent)' : 'transparent',
+                                border: `1.5px solid ${selected ? 'var(--accent)' : 'var(--text-muted)'}`,
+                              }}
+                            >
+                              {selected && (
+                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3">
+                                  <polyline points="20 6 9 17 4 12" />
+                                </svg>
+                              )}
+                            </span>
+                            <span className="font-medium" style={{ color: 'var(--accent)' }}>{String.fromCharCode(65 + i)}.</span>
+                            <span className="truncate">{choice.text}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </SectionBlock>
         )}

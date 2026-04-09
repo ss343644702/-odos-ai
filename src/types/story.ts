@@ -107,6 +107,8 @@ export interface StoryNodeData {
   audioUrl: string | null;
   choices: Choice[];
   allowCustomInput: boolean;
+  constrainIntents?: boolean;            // 限制自由输入意图方向
+  constrainIntentChoiceIds?: string[];   // 允许的选项 ID 列表
   depth: number; // 当前层级 (0-based)
   voiceSegments: VoiceSegment[];
   frames: Frame[];             // 多画面帧，空数组 = 兼容旧单图模式

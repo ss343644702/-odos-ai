@@ -219,7 +219,7 @@ export default function StoryConfigPanel() {
     <div
       className="fixed top-14 right-0 bottom-0 w-80 overflow-y-auto z-40"
       style={{
-        background: 'rgba(18, 18, 26, 0.95)',
+        background: 'rgba(242, 241, 237, 0.95)',
         borderLeft: '1px solid var(--border)',
         backdropFilter: 'blur(12px)',
         animation: 'slideInRight 0.2s ease-out',
@@ -228,7 +228,7 @@ export default function StoryConfigPanel() {
       {/* Header */}
       <div
         className="sticky top-0 flex items-center justify-between p-4 z-10"
-        style={{ background: 'rgba(18, 18, 26, 0.95)', borderBottom: '1px solid var(--border)' }}
+        style={{ background: 'rgba(242, 241, 237, 0.95)', borderBottom: '1px solid var(--border)' }}
       >
         <div className="flex items-center gap-2">
           <span
@@ -879,6 +879,19 @@ function EntityCard({ entity, type, isGenerating, onUpdateField, onRegenImage, o
   onRemove?: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [uploadingImage, setUploadingImage] = useState(false);
+
+  const handleUploadImage = async (file: File) => {
+    setUploadingImage(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const res = await fetch('/api/upload', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (data.url) onUpdateField('imageUrl', data.url);
+    } catch { /* silent */ }
+    setUploadingImage(false);
+  };
 
   return (
     <div className="rounded-lg overflow-hidden" style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border)' }}>
@@ -968,18 +981,30 @@ function EntityCard({ entity, type, isGenerating, onUpdateField, onRegenImage, o
             />
           </div>
 
-          {/* Regen button */}
-          <button
-            onClick={onRegenImage}
-            disabled={isGenerating}
-            className="w-full text-[11px] py-1.5 rounded-lg transition-colors"
-            style={{
-              background: isGenerating ? 'var(--bg-secondary)' : 'var(--accent-dim)',
-              color: isGenerating ? 'var(--text-muted)' : 'var(--accent)',
-            }}
-          >
-            {isGenerating ? '生成中...' : '重新生成图片'}
-          </button>
+          {/* Image buttons */}
+          <div className="flex gap-1.5">
+            <label
+              className="flex-1 text-center text-[11px] py-1.5 rounded-lg transition-colors cursor-pointer"
+              style={{ border: '1px solid var(--border)', color: uploadingImage ? 'var(--text-muted)' : 'var(--text-secondary)' }}
+            >
+              {uploadingImage ? '上传中...' : '上传图片'}
+              <input
+                type="file" accept="image/*" className="hidden"
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) handleUploadImage(f); e.target.value = ''; }}
+              />
+            </label>
+            <button
+              onClick={onRegenImage}
+              disabled={isGenerating}
+              className="flex-1 text-[11px] py-1.5 rounded-lg transition-colors"
+              style={{
+                background: isGenerating ? 'var(--bg-secondary)' : 'var(--accent-dim)',
+                color: isGenerating ? 'var(--text-muted)' : 'var(--accent)',
+              }}
+            >
+              {isGenerating ? '生成中...' : 'AI生成图片'}
+            </button>
+          </div>
 
           {/* Delete button */}
           {onRemove && (

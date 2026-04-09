@@ -47,6 +47,21 @@ export default function PlayPage() {
           entities: (dbStory as any).entities || null,
         };
 
+        // Check for existing session with dynamic nodes to restore progress
+        try {
+          const sessRes = await fetch(`/api/sessions?storyId=${storyId}`);
+          if (sessRes.ok) {
+            const sessData = await sessRes.json();
+            if (sessData.session?.dynamicNodes?.length > 0) {
+              // Merge dynamic nodes into story
+              fullStory.nodes = [...fullStory.nodes, ...sessData.session.dynamicNodes];
+              if (sessData.session.dynamicEdges?.length > 0) {
+                fullStory.edges = [...fullStory.edges, ...sessData.session.dynamicEdges];
+              }
+            }
+          }
+        } catch { /* no session to restore */ }
+
         initSession(fullStory);
       } catch {
         setError('找不到这个影游');

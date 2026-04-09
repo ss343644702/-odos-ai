@@ -22,10 +22,14 @@ export function getEntityImageList(
     if (prop?.imageUrl) { images.push({ image: prop.imageUrl }); continue; }
   }
 
-  // Fallback: match by character name
-  if (images.length === 0 && characterName) {
-    const char = entities.characters.find((c) => c.name === characterName);
-    if (char?.imageUrl) images.push({ image: char.imageUrl });
+  // Always try to add player character reference (appears in almost every frame)
+  const hasCharRef = refs.some((r) => entities.characters.some((c) => c.id === r));
+  if (!hasCharRef) {
+    // Try by characterName first, then fallback to player role
+    const charByName = characterName ? entities.characters.find((c) => c.name === characterName) : null;
+    const playerChar = entities.characters.find((c) => c.role === 'player');
+    const charToAdd = charByName || playerChar;
+    if (charToAdd?.imageUrl) images.push({ image: charToAdd.imageUrl });
   }
 
   // Add first scene if no scene ref found

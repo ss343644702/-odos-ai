@@ -14,6 +14,8 @@ export async function PUT(
     if (body.currentNodeId !== undefined) data.currentNodeId = body.currentNodeId;
     if (body.history !== undefined) data.history = body.history;
     if (body.achievements !== undefined) data.achievements = body.achievements;
+    if (body.dynamicNodes !== undefined) data.dynamicNodes = body.dynamicNodes;
+    if (body.dynamicEdges !== undefined) data.dynamicEdges = body.dynamicEdges;
 
     const session = await prisma.playSession.update({
       where: { id },

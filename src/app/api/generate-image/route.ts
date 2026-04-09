@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { submitImageGeneration, queryImageResult } from '@/lib/keling';
+import { persistImageUrl } from '@/lib/oss';
 
 export async function POST(request: NextRequest) {
   const { prompt, aspectRatio, nodeId, image_list, imageFidelity } = await request.json();
@@ -39,6 +40,10 @@ export async function GET(request: NextRequest) {
 
   try {
     const result = await queryImageResult(taskId);
+    // Persist completed images to OSS for permanent storage
+    if (result.status === 'completed' && result.imageUrl) {
+      result.imageUrl = await persistImageUrl(result.imageUrl);
+    }
     return NextResponse.json({
       success: true,
       ...result,

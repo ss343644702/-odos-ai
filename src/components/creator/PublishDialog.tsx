@@ -1,9 +1,10 @@
 'use client';
 
 import { useState, useMemo, useRef } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useParams } from 'next/navigation';
 import { useEditorStore } from '@/stores/editorStore';
 import { useStoryStore } from '@/stores/storyStore';
+import { useChatStore } from '@/stores/chatStore';
 
 export default function PublishDialog() {
   const publishDialogOpen = useEditorStore((s) => s.publishDialogOpen);
@@ -54,10 +55,18 @@ export default function PublishDialog() {
       formData.append('file', file);
       const res = await fetch('/api/upload', { method: 'POST', body: formData });
       const { url } = await res.json();
-      if (url) setCoverUrl(url);
+      if (url) {
+        setCoverUrl(url);
+        // Sync to storyStore so auto-save picks it up
+        const s = useStoryStore.getState().story;
+        if (s) useStoryStore.getState().setStory({ ...s, coverImageUrl: url, updatedAt: new Date().toISOString() });
+      }
     } catch { /* silent */ }
     setUploadingCover(false);
   };
+
+  const params = useParams();
+  const existingStoryId = params?.storyId && params.storyId !== 'new' ? (params.storyId as string) : null;
 
   if (!publishDialogOpen || !story) return null;
 
@@ -79,28 +88,49 @@ export default function PublishDialog() {
     setError('');
 
     try {
-      // Save story data first
       const storyData = {
         nodes: story.nodes || [],
         edges: story.edges || [],
         settings: story.settings,
         style: story.style,
         worldView: story.worldView,
+        playerObjective: story.playerObjective || undefined,
       };
+      const entities = story.entities || useChatStore.getState().orchestrator.entities || undefined;
 
-      // Create story in DB if it doesn't exist, then publish
-      const createRes = await fetch('/api/stories', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: title.trim(),
-          description: description.trim(),
-          data: storyData,
-          tags,
-        }),
-      });
-      const { id } = await createRes.json();
-      if (!id) throw new Error('Failed to create story');
+      let id = existingStoryId;
+
+      if (id) {
+        // Update existing story
+        await fetch(`/api/stories/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: title.trim(),
+            description: description.trim(),
+            coverImageUrl: coverUrl || null,
+            data: storyData,
+            entities,
+            tags,
+          }),
+        });
+      } else {
+        // Create new story (only for /editor/new)
+        const createRes = await fetch('/api/stories', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: title.trim(),
+            description: description.trim(),
+            data: storyData,
+            entities,
+            tags,
+          }),
+        });
+        const data = await createRes.json();
+        id = data.id;
+        if (!id) throw new Error('Failed to create story');
+      }
 
       // Publish
       const pubRes = await fetch(`/api/stories/${id}/publish`, {
@@ -117,7 +147,7 @@ export default function PublishDialog() {
       if (!pubData.success) throw new Error('Failed to publish');
 
       setPublishDialogOpen(false);
-      router.push(`/play/${id}`);
+      router.push('/discover');
     } catch (err: any) {
       setError(err.message || '发布失败，请重试');
       setPublishing(false);

@@ -1586,17 +1586,15 @@ export default function AgentChat() {
 
     // ========== ReAct Mode (only mode) ==========
     addMessage({ role: 'user', content: text });
-    // Resume if loop has existing progress — don't reset completed skills
-    const skills = useChatStore.getState().orchestrator.skills;
-    const hasExistingProgress = skills.some(s => s.status !== 'idle');
+    // Resume if there's any existing conversation (messages or skill progress)
+    const chatState = useChatStore.getState();
+    const hasMessages = chatState.messages.length > 1; // > 1 because we just added the user message
+    const hasSkillProgress = chatState.orchestrator.skills.some(s => s.status !== 'idle');
+    const hasExistingProgress = hasMessages || hasSkillProgress;
     const loopStatus = reactLoop.status;
     const isRunning = loopStatus === 'thinking' || loopStatus === 'acting';
 
-    console.log(`[handleSend] loopStatus=${loopStatus}, hasExistingProgress=${hasExistingProgress}, skills=${skills.map(s => `${s.name}:${s.status}`).join(',')}`);
-
     if (hasExistingProgress && !isRunning) {
-      // Continue existing conversation — don't reset skills
-      console.log('[handleSend] → resumeLoop');
       reactLoop.resumeLoop(text);
     } else if (!isRunning) {
       // Fresh start — no existing progress
@@ -1638,7 +1636,7 @@ export default function AgentChat() {
     <div
       className="fixed top-14 left-0 bottom-0 w-80 flex flex-col z-40"
       style={{
-        background: 'rgba(18, 18, 26, 0.95)',
+        background: 'rgba(242, 241, 237, 0.95)',
         borderRight: '1px solid var(--border)',
         backdropFilter: 'blur(12px)',
         animation: 'slideIn 0.2s ease-out',

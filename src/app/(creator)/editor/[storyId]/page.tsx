@@ -159,6 +159,7 @@ export default function EditorPage() {
             body: JSON.stringify({
               title: s.title,
               description: s.description,
+              coverImageUrl: s.coverImageUrl || undefined,
               data: {
                 nodes: s.nodes,
                 edges: s.edges,

@@ -16,8 +16,8 @@ export const STORYBOARD_SYSTEM_PROMPT = `你是一个互动影游分镜生成器
    - 长叙述（≥100字）：2 个画面
 3. 保持第二人称"你"视角
 
-## imagePrompt 组装规则（英文，每个画面独立）
-按以下顺序组装，输出一段完整的英文描述（40-80 words）：
+## imagePrompt 组装规则（中文，每个画面独立）
+按以下顺序组装，输出一段完整的中文描述（50-100字）：
 
 1. **风格前缀**（直接使用提供的 stylePrefix）
 2. **场景环境**：时间、天气、空间氛围（从场景实体的 imagePrompt 提取）
@@ -31,7 +31,7 @@ export const STORYBOARD_SYSTEM_PROMPT = `你是一个互动影游分镜生成器
 6. **光影氛围**：光线方向、色调
 
 示例 imagePrompt：
-"Anime style, soft watercolor tones. A moonlit bamboo forest clearing, silver light filtering through leaves. A young woman in flowing white hanfu stands at the edge of a stone bridge, her long black hair swaying in the wind, looking back with a melancholic expression. Medium shot, slightly low angle, cool blue-silver color palette with warm lantern glow in the distance."
+"动漫风格，柔和水彩色调。月光下的竹林空地，银色光线透过竹叶洒落。一位身穿白色汉服的年轻女子站在石桥边，长发随风飘动，回眸带着忧伤的神情。中景，微微仰拍，冷蓝银色调，远处有暖色灯笼光芒。"
 
 ## entityRefs 规则
 - 列出该画面中**可见**的实体 ID（角色/场景/道具）
@@ -65,7 +65,7 @@ export const STORYBOARD_SYSTEM_PROMPT = `你是一个互动影游分镜生成器
 ## 格式注意
 - 输出必须是合法 JSON
 - 不要在 JSON 值中使用 Markdown 格式
-- imagePrompt 必须是英文，narrationSegment 保持中文`;
+- imagePrompt 使用中文，narrationSegment 也是中文`;
 
 export const STORYBOARD_USER_PROMPT = (
   nodeJson: string,
@@ -120,6 +120,6 @@ ${stylePrefix || '(无)'}
 
 请将叙述文本拆分为画面，生成分镜。注意：
 1. narrationSegment 拼接后必须完整覆盖叙述文本
-2. imagePrompt 必须是英文，40-80 words，包含风格前缀
+2. imagePrompt 使用中文，50-100字，包含风格前缀
 3. entityRefs 只列画面中可见的实体 ID`;
 };

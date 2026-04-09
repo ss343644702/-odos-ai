@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { callLLM, parseJsonFromResponse } from '@/lib/claude';
 import { moderateContent, sanitizeOutput } from '@/lib/safety';
 import { synthesizeSpeech } from '@/lib/minimax-tts';
-import { uploadAudio } from '@/lib/oss';
+import { uploadAudio, persistImageUrl } from '@/lib/oss';
 import { submitImageGeneration, pollImageResult } from '@/lib/keling';
 import { getEntityImageList } from '@/lib/entity-utils';
 import { VOICE_SYSTEM_PROMPT, VOICE_USER_PROMPT } from '@/lib/agent/prompts/voice';
@@ -35,15 +35,21 @@ const BRANCH_CONTINUE_PROMPT = `你是一个互动影游的剧情推理引擎。
   ]
 }
 
-## 要求
-- narration 100-150字，使用第二人称"你"视角
-- 叙述要承接上一步的选择，有因果关系
-- 恰好生成 **2 个选项**：
-  - **branch（1个）**: 继续探索新路径
-  - **converge（1个）**: 通过过渡剧情自然回到主线，**必须附带 converge_narration**，描述如何过渡到目标节点的**开头情境**
-- converge 的收束目标 = 主线节点的**开头**，确保过渡后能自然接上该节点的第一句话
-- 选项文字用简洁动作短语，不要加"我"字开头
-- **严禁引用玩家尚未遇到的角色或事件**。只能出现"此前的支线剧情经过"中提到的角色`;
+## narration 写作铁律
+- **80-120字**，第二人称"你"
+- 第一句必须是上步选择的**直接结果**
+- ❌ 禁止：排比句、空洞形容词、比喻堆砌、内心OS、AI套话
+- ✅ 用动作写心理、用细节写人物
+- 严禁引用玩家尚未遇到的角色
+
+## choices 要求
+- 恰好 **2 个选项**，每个是**具体行动**（不是态度/方向）
+- 两个选项导向不同后果，选了就回不了头
+- **branch（1个）**: 当前情境下的具体行动
+- **converge（1个）**: 具体行动 + converge_narration（50-80字）过渡到主线
+- **converge 选项也必须是具体行动**，不能是"回到主线"这种 meta 表述
+  ✅ "把线索带回去找陈雅核实"（自然导向主线）
+  ❌ "回到故事主线"（meta，破坏沉浸感）`;
 
 const BRIDGE_PROMPT = `你是一个互动影游的剧情过渡引擎。你的任务是为支线剧情生成**回归主线的过渡叙述**。
 
@@ -173,14 +179,14 @@ async function generateNodeContent(
           const imageList = entities ? getEntityImageList(entities, (frame as any).entityRefs, node.data.character) : [];
           const taskId = await submitImageGeneration({
             prompt: frame.imagePrompt,
-            model_name: 'kling-v1',
+            model_name: 'kling-image-o1',
             aspect_ratio: '16:9',
             image_list: imageList.length > 0 ? imageList : undefined,
           });
           console.log(`[PREFETCH-IMG] submitted taskId=${taskId}`);
-          const result = await pollImageResult(taskId, { maxAttempts: 15, initialDelay: 3000, endpoint: '/v1/images/generations' });
+          const result = await pollImageResult(taskId, { maxAttempts: 15, initialDelay: 3000, endpoint: '/v1/images/omni-image' });
           console.log(`[PREFETCH-IMG] result: status=${result.status}, hasUrl=${!!result.imageUrl}`);
-          if (result.imageUrl) frame.imageUrl = result.imageUrl;
+          if (result.imageUrl) frame.imageUrl = await persistImageUrl(result.imageUrl);
         } catch (err: any) { console.error(`[PREFETCH-IMG] error: ${err.message}`); }
       }),
     ),
@@ -272,7 +278,7 @@ export async function POST(request: NextRequest) {
           ``,
           `请判断能否自然过渡到目标节点，并生成过渡叙述。`,
         ].filter(Boolean).join('\n'),
-        temperature: 0.7,
+        temperature: 0.5,
         maxTokens: 2048,
       });
       const bridge = parseJsonFromResponse(bridgeResponse);
@@ -305,7 +311,7 @@ export async function POST(request: NextRequest) {
 - 叙述结束时的情境要和目标主线节点一致，让后续选项逻辑上讲得通
 - 输出JSON: {"narration": "...", "title": "..."}`,
               userMessage: `## 上一个节点的过渡叙述（不要重复这段内容）\n${node.data.narration || ''}\n\n## 目标主线节点\n标题: ${targetNode.title || ''}\n叙述: ${targetNode.narration || ''}\n\n## 目标主线节点的选项（你的叙述结束后玩家会看到这些）\n${(targetNode.choices || []).map((c: any) => `- ${c.text}`).join('\n')}\n\n请直接写到达目标场景后的叙述，不要重复过渡内容。`,
-              temperature: 0.7,
+              temperature: 0.5,
               maxTokens: 1024,
             });
             const alt = parseJsonFromResponse(altResponse);
@@ -317,11 +323,13 @@ export async function POST(request: NextRequest) {
                 title: alt.title || targetNode.title || '命运转折',
                 narration: alt.narration || bridge.narration || '',
                 dialogue: null, character: null, imageUrl: null, imagePrompt: '', audioUrl: null,
-                choices: (targetNode.choices || []).map((c: any) => ({
-                  id: `choice_alt_${altNodeId}_${c.id || Date.now()}`,
-                  text: c.text,
-                  targetNodeId: c.targetNodeId,
-                })),
+                choices: (targetNode.choices || [])
+                  .filter((c: any) => !c.visibility || c.visibility !== 'hidden')
+                  .map((c: any) => ({
+                    id: `choice_alt_${altNodeId}_${c.id || Date.now()}`,
+                    text: c.text,
+                    targetNodeId: c.targetNodeId,
+                  })),
                 allowCustomInput: true, depth: 0, voiceSegments: [], frames: [],
                 metadata: { tags: ['ai_generated', 'alt_mainline'], storyContext: updatedBridgeContext },
               },
@@ -417,7 +425,7 @@ export async function POST(request: NextRequest) {
           userMessage: node.type === 'ending'
             ? `## 故事世界观\n${worldView}${playerObjective ? `\n\n## 玩家目标\n目标：${playerObjective.primary}\n衡量维度：${playerObjective.measurement}` : ''}\n\n## 结局节点\n标题: ${node.data.title}\n\n## 此前的支线剧情经过\n${node.data.metadata?.storyContext || '(无)'}\n\n请为这个结局生成一段完整的叙述（100-200字），不需要选项。用第二人称"你"视角，给故事一个有感染力的收尾。叙述必须承接上面的支线剧情，体现玩家策略选择的后果。输出JSON: {"narration": "...", "title": "..."}`
             : `## 故事世界观\n${worldView}${playerObjective ? `\n\n## 玩家目标\n目标：${playerObjective.primary}\n衡量维度：${playerObjective.measurement}` : ''}\n\n## 当前分支节点\n标题: ${node.data.title}\n\n## 此前的支线剧情经过（你的叙述必须承接这些内容）\n${node.data.metadata?.storyContext || '(无)'}\n\n## 主线节点ID列表\n${(mainPlotNodeIds || []).join(', ')}\n\n## 收束目标节点\nID: ${convergenceTarget}${convergenceTargetContext ? `\n标题: ${convergenceTargetContext.title || '未知'}\n剧情: ${convergenceTargetContext.narration || '未知'}` : ''}\n\n## 当前分支深度: ${maxDepth + 1}\n\n请生成该节点的完整叙述和后续选项。叙述要承接上面的剧情经过，保持因果连贯。`,
-          temperature: 0.7,
+          temperature: 0.6,
           maxTokens: 2048,
         });
         const decision = parseJsonFromResponse(decisionResponse);
@@ -459,7 +467,7 @@ export async function POST(request: NextRequest) {
                 },
               });
               return { id: `choice_${node.id}_${i}`, text: c.text, targetNodeId: convergeNodeId };
-            } else if (c.type === 'branch' && maxDepth < 1) {
+            } else if (c.type === 'branch') {
               const branchNodeId = `ai_branch_${Date.now()}_${node.id}_${i}`;
               // Create converge_bridge fallback for branch node
               const branchConvergeId = `ai_branch_converge_${Date.now()}_${node.id}_${i}`;

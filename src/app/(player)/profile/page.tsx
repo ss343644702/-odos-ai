@@ -26,6 +26,7 @@ export default function ProfilePage() {
   const [activeTab, setActiveTab] = useState<Tab>('works');
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [showMenu, setShowMenu] = useState<string | null>(null);
+  const [dbProfile, setDbProfile] = useState<{ nickname?: string; avatarUrl?: string } | null>(null);
 
   const published = stories.filter((s) => s.status === 'PUBLISHED');
   const drafts = stories.filter((s) => s.status === 'DRAFT');
@@ -47,7 +48,14 @@ export default function ProfilePage() {
       const supabase = getSupabaseBrowser();
       const { data: { user } } = await supabase.auth.getUser();
       setUser(user);
-      if (user) await loadStories();
+      if (user) {
+        await loadStories();
+        // Load DB profile (nickname, avatarUrl) which may differ from Supabase metadata
+        try {
+          const meRes = await fetch('/api/me');
+          if (meRes.ok) setDbProfile(await meRes.json());
+        } catch { /* ignore */ }
+      }
       setLoading(false);
     };
     load();
@@ -97,8 +105,8 @@ export default function ProfilePage() {
     );
   }
 
-  const displayName = user.user_metadata?.full_name || user.user_metadata?.name || user.email?.split('@')[0] || '用户';
-  const avatarUrl = user.user_metadata?.avatar_url;
+  const displayName = dbProfile?.nickname || user.user_metadata?.full_name || user.user_metadata?.name || user.email?.split('@')[0] || '用户';
+  const avatarUrl = dbProfile?.avatarUrl || user.user_metadata?.avatar_url;
 
   const tabs: { key: Tab; label: string; icon: React.ReactNode }[] = [
     {

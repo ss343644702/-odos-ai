@@ -47,7 +47,7 @@ const NarrationPlayer = forwardRef<NarrationPlayerHandle, NarrationPlayerProps>(
     useEffect(() => { onSegmentChangeRef.current = onSegmentChange; }, [onSegmentChange]);
 
     const voiceSegmentsRef = useRef(voiceSegments);
-    useEffect(() => { voiceSegmentsRef.current = voiceSegments; }, [voiceSegments]);
+    voiceSegmentsRef.current = voiceSegments; // Sync update during render (no effect delay)
 
     // Stop any current playback (including preloaded audio)
     const stopAll = useCallback(() => {

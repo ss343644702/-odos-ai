@@ -40,7 +40,7 @@ export default function PreviewModal() {
         style={{
           background: 'var(--bg-primary)',
           border: '2px solid var(--border)',
-          boxShadow: '0 0 60px rgba(108, 92, 231, 0.15)',
+          boxShadow: '0 0 60px rgba(201, 100, 66, 0.12)',
         }}
       >
         <GameplayView isPreview />

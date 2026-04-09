@@ -45,5 +45,5 @@ export default function CreatorLayout({
     );
   }
 
-  return <>{children}</>;
+  return <div className="theme-creator">{children}</div>;
 }

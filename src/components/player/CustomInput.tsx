@@ -67,8 +67,8 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
       nodes: toProcess,
       worldView: story?.worldView || '',
       playerObjective: story?.playerObjective || null,
-      mainPlotNodeIds: story?.nodes?.filter((n) => n.type !== 'ai_generated').map((n) => n.id) || [],
-      mainPlotNodes: story?.nodes?.filter((n) => n.type !== 'ai_generated').map((n) => ({
+      mainPlotNodeIds: story?.nodes?.filter((n) => n.type !== 'ai_generated' && n.type !== 'story_config').map((n) => n.id) || [],
+      mainPlotNodes: story?.nodes?.filter((n) => n.type !== 'ai_generated' && n.type !== 'story_config').map((n) => ({
         id: n.id, type: n.type, title: n.data.title, narration: n.data.narration?.slice(0, 200),
         choices: n.data.choices?.map((c) => ({ id: c.id, text: c.text, targetNodeId: c.targetNodeId })),
       })) || [],
@@ -149,7 +149,7 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
 
     const meta = currentNode.data.metadata || {};
     const ct = meta.convergenceTarget ||
-      allNodes.filter((n) => n.type !== 'ai_generated').map((n) => n.id)[0] || '';
+      allNodes.filter((n) => n.type !== 'ai_generated' && n.type !== 'story_config').map((n) => n.id)[0] || '';
 
     runPrefetch(childStubs, 1, ct);
   }, [nodeId, runPrefetch]);
@@ -158,7 +158,7 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
   const callPipeline = useCallback(async (text: string) => {
     const buildBody = () => {
       const allNodes = story?.nodes || [];
-      const mainNodes = allNodes.filter((n) => n.type !== 'ai_generated');
+      const mainNodes = allNodes.filter((n) => n.type !== 'ai_generated' && n.type !== 'story_config');
 
       // Build rich main plot nodes with choice text + connection info
       const mainPlotNodes = mainNodes.map((n) => ({
@@ -209,6 +209,15 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
         currentNodeContext: (() => {
           const node = allNodes.find((n) => n.id === nodeId);
           return node ? { title: node.data.title, narration: node.data.narration, dialogue: node.data.dialogue, character: node.data.character } : null;
+        })(),
+        // Intent constraint: if enabled, send allowed choice texts for LLM validation
+        constrainIntents: (() => {
+          const node = allNodes.find((n) => n.id === nodeId);
+          if (!node?.data.constrainIntents || !node.data.constrainIntentChoiceIds?.length) return null;
+          const allowedIds = new Set(node.data.constrainIntentChoiceIds);
+          return (node.data.choices || [])
+            .filter((c: any) => allowedIds.has(c.id))
+            .map((c: any) => c.text);
         })(),
         style: story?.style || null,
         entities: story?.entities || null,
@@ -348,6 +357,18 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ storyId, parentNodeId: nodeId, playerInput: text, generatedNodes: result.newNodes, generatedEdges: [] }),
       }).catch(() => {});
+
+      // Persist all dynamic nodes to session DB for cross-device recovery
+      if (session?.id) {
+        const allDynamic = usePlayerStore.getState().generatedBranches;
+        const allDynamicNodes = allDynamic.flatMap((b: any) => b.generatedNodes || []);
+        const allDynamicEdges = allDynamic.flatMap((b: any) => b.generatedEdges || []);
+        fetch(`/api/sessions/${session.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dynamicNodes: allDynamicNodes, dynamicEdges: allDynamicEdges }),
+        }).catch(() => {});
+      }
 
       // Fire prefetch for ALL extra nodes needing content during playback
       const incompleteNodes = result.newNodes.slice(1).filter(

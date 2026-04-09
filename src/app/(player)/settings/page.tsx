@@ -96,7 +96,7 @@ export default function SettingsPage() {
   return (
     <div className="min-h-screen pb-20" style={{ background: 'var(--bg-primary)' }}>
       {/* Top bar */}
-      <div className="flex items-center gap-3 px-4 py-3 sticky top-0 z-10" style={{ background: 'rgba(12,12,16,0.95)', backdropFilter: 'blur(12px)' }}>
+      <div className="flex items-center gap-3 px-4 py-3 sticky top-0 z-10" style={{ background: 'rgba(245,244,237,0.92)', backdropFilter: 'blur(12px)' }}>
         <button onClick={() => router.back()} className="p-1" style={{ color: 'var(--text-secondary)' }}>
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
             <path d="M15 18l-6-6 6-6" />

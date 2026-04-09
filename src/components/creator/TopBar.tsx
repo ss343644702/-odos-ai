@@ -59,7 +59,7 @@ export default function TopBar() {
         background: 'var(--bg-secondary)',
         borderBottom: '1px solid var(--border)',
         backdropFilter: 'blur(12px)',
-        backgroundColor: 'rgba(18, 18, 26, 0.9)',
+        backgroundColor: 'rgba(242, 241, 237, 0.9)',
       }}
     >
       {/* Left: Home + Agent toggle + title */}

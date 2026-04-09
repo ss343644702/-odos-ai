@@ -313,16 +313,14 @@ function StoryCanvasInner() {
   const handleAddNode = useCallback((nodeType: 'scene' | 'ending') => {
     if (!story) return;
     const existingNodes = (story.nodes || []).filter((n) => n.type !== 'story_config');
-    // Position at center of viewport
+    // Position at center of current viewport
     let pos = { x: 300, y: 200 };
     try {
       pos = screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
     } catch { /* fallback */ }
-    // Offset if overlapping
-    if (existingNodes.length > 0) {
-      const maxX = Math.max(...existingNodes.map((n) => n.position.x));
-      pos.x = Math.max(pos.x, maxX + 300);
-    }
+    // Small random offset to avoid exact overlap if multiple nodes added
+    pos.x += Math.round((Math.random() - 0.5) * 40);
+    pos.y += Math.round((Math.random() - 0.5) * 40);
 
     const newNode: StoryNode = {
       id: uuid(),
@@ -391,14 +389,15 @@ function StoryCanvasInner() {
           nodeColor={(node) => {
             const nodeType = (node.data as any)?.nodeType || 'scene';
             const colors: Record<string, string> = {
-              start: '#00b894',
-              scene: '#6c5ce7',
-              ending: '#e17055',
-              ai_generated: '#a29bfe',
+              start: '#10B981',
+              scene: '#6366F1',
+              ending: '#EF4444',
+              ai_generated: '#818CF8',
+              story_config: '#c96442',
             };
-            return colors[nodeType] || '#6c5ce7';
+            return colors[nodeType] || '#c96442';
           }}
-          maskColor="rgba(10, 10, 15, 0.8)"
+          maskColor="rgba(242, 241, 237, 0.85)"
         />
       </ReactFlow>
 

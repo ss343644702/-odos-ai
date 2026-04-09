@@ -131,7 +131,7 @@ ${JSON.stringify(input.existingOutline, null, 2)}
         await callLLMStream({
           systemPrompt,
           userMessage,
-          temperature: (skill === 'branchGenerator' || skill === 'branchComplete' || skill === 'expandNode' || skill === 'branchMainline' || skill === 'branchSubline') ? 0.85 : 0.7,
+          temperature: (skill === 'branchGenerator' || skill === 'branchComplete' || skill === 'expandNode' || skill === 'branchMainline' || skill === 'branchSubline') ? 0.7 : (skill === 'outlineGenerator' ? 0.6 : 0.7),
           maxTokens: (skill === 'branchGenerator' || skill === 'branchComplete' || skill === 'outlineGenerator' || skill === 'editOutline' || skill === 'branchMainline' || skill === 'branchSubline') ? 16384 : (skill === 'chat' ? 2048 : 4096),
           jsonMode: skill !== 'chat',
           onChunk(text) {

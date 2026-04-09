@@ -389,7 +389,7 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
                 }}
                 className="w-2 h-2 rounded-full transition-all cursor-pointer"
                 style={{
-                  background: i === currentSegmentIndex ? 'white' : 'rgba(255,255,255,0.4)',
+                  background: i === currentSegmentIndex ? 'var(--accent)' : 'rgba(0,0,0,0.15)',
                   transform: i === currentSegmentIndex ? 'scale(1.3)' : 'scale(1)',
                 }}
               />
@@ -495,8 +495,12 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
           ) : (
             <>
               <ChoicePanel
-                choices={(currentNode.data.choices || []).filter((c: any) => !c.visibility || c.visibility !== 'hidden')}
+                choices={isPreview
+                  ? (currentNode.data.choices || [])
+                  : (currentNode.data.choices || []).filter((c: any) => !c.visibility || c.visibility !== 'hidden')
+                }
                 onChoose={handleChoose}
+                showHiddenBadge={isPreview}
               />
               {!isPreview && <CustomInput nodeId={currentNode.id} storyId={story.id} />}
             </>
