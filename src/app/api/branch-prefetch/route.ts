@@ -435,15 +435,20 @@ export async function POST(request: NextRequest) {
         if (targetNode && targetNode.choices?.length > 0) {
           // Generate an "alternative mainline node" with context-aware narration + same choices
           try {
+            const altStoryline = storyline
+              ? `\n\n## 故事至此（玩家已经亲历/已知的线性剧情，权威前情）\n${storyline}`
+              : '';
             const altResponse = await callLLM({
               systemPrompt: `你是一个互动影游的剧情引擎。上一个节点（过渡）已经把玩家**带到了目标场景的门口**，现在由你来写**推开门之后、到达目标场景的此刻**。
 要求：
 - 100-150字，第二人称"你"视角
 - **承接上一段过渡，但绝不重复它**：过渡写的是"你赶往这里"，你写的是"你到了之后看到/面对什么"。两段读起来要像连续的一前一后，而不是把同一件事讲两遍。
-- 直接落地目标情境：玩家现在在哪、眼前是什么、面对什么局面，结束时的情境与目标主线节点一致，让后续选项逻辑上讲得通
-- 不要照抄目标主线节点的叙述原文，用你自己的话把同一处境写出来
+- ⚠️ **绝不能重演玩家已经做过的事**：仔细读【故事至此】，如果"目标主线节点"描述的关键动作/发现玩家**已经经历过**（例如已经拉开抽屉、已经打开暗格、已经拆开勒索信），**绝对不能再写一遍**那个发现过程。要写"在已知这些之后"的当下处境与新进展，而不是让玩家重新发现已知的东西。
+- 直接落地当前处境：玩家现在在哪、眼前是什么、面对什么局面，结束时能自然接上后续选项
+- 不要照抄目标主线节点的叙述原文；目标节点剧情若与玩家已知重叠，只取"尚未发生的部分"来写
+- ⚠️ 不得使用"支线/主线/收束"等游戏机制词
 - 输出JSON: {"narration": "...", "title": "..."}`,
-              userMessage: `## 上一个节点的过渡叙述（你要承接它的"到门口"，但不要重复它的内容）\n${node.data.narration || ''}\n\n## 目标主线节点（你要落地到这个处境，但用自己的话写，别照抄）\n标题: ${targetNode.title || ''}\n叙述: ${targetNode.narration || ''}\n\n## 目标主线节点的选项（你的叙述结束后玩家会看到这些）\n${(targetNode.choices || []).map((c: any) => `- ${c.text}`).join('\n')}\n\n请写"推开门之后到达目标场景的此刻"，承接过渡但不重复。`,
+              userMessage: `## 上一个节点的过渡叙述（承接它的"到门口"，但不要重复）\n${node.data.narration || ''}${altStoryline}\n\n## 目标主线节点（落地参考；⚠️ 其中玩家【已经经历过】的部分绝不能再写一遍，只取尚未发生的部分，用自己的话写）\n标题: ${targetNode.title || ''}\n叙述: ${targetNode.narration || ''}\n\n## 目标主线节点的选项（你的叙述结束后玩家会看到这些）\n${(targetNode.choices || []).map((c: any) => `- ${c.text}`).join('\n')}\n\n请写"到达目标场景后、且不重演玩家已知内容"的当下叙述。`,
               temperature: 0.5,
               maxTokens: 1024,
             });
