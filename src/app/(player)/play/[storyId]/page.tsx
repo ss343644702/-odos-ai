@@ -12,6 +12,17 @@ export default function PlayPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
+  // The play page is a fixed full-screen experience — lock the viewport so it can't be
+  // scrolled/dragged up-down on mobile. Removed on unmount (leaving the play route).
+  useEffect(() => {
+    document.documentElement.classList.add('play-locked');
+    document.body.classList.add('play-locked');
+    return () => {
+      document.documentElement.classList.remove('play-locked');
+      document.body.classList.remove('play-locked');
+    };
+  }, []);
+
   useEffect(() => {
     const loadStory = async () => {
       setLoading(true);

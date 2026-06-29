@@ -92,6 +92,19 @@ body.overflow-locked {
   overflow: hidden;
 }
 
+/* Full-screen play page: lock the whole viewport so it can't be scrolled/dragged on mobile
+   (fixed + 100% beats plain overflow:hidden, which iOS Safari still rubber-bands past).
+   No touch-action:none here — taps/skip/choice gestures must still work. */
+html.play-locked,
+body.play-locked {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
 /* ReactFlow custom theme */
 .react-flow__background {
   background: var(--bg-primary) !important;
