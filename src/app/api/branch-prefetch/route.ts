@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { callLLM, parseJsonFromResponse } from '@/lib/claude';
-import { moderateContent, sanitizeOutput } from '@/lib/safety';
+import { moderateContent, sanitizeOutput, stripMetaVocabulary } from '@/lib/safety';
 import { synthesizeSpeech } from '@/lib/minimax-tts';
 import { uploadAudio } from '@/lib/oss';
 import { reconcileVoiceTypes, inferEntityRefs } from '@/lib/entity-utils';
@@ -43,6 +43,7 @@ const BRANCH_CONTINUE_PROMPT = `你是一个互动影游的剧情推理引擎。
 - ✅ 用动作写心理、用细节写人物
 - 严禁引用玩家尚未遇到的角色
 - ⚠️ **严禁暗示玩家还没做过的事**：不能写"比盘问埃德时更…""和上次搜书房一样""她比其他人都…"这类对比/总结——这暗示玩家已经做过那些事。叙述只能基于【故事至此】里真实发生过的内容，玩家没经历过的对比、回忆一律不许出现。
+- ⚠️ **严禁出现任何"游戏结构"元词汇**：narration 和选项里**绝对不能**出现"支线""主线""分支""收束""回到主线""剧情线""路线""玩家""选项""节点"这类词——会暴露游戏机制、破坏沉浸感。要用剧情内的说法复述玩家做过的事（不要写"你已经在支线中拆开了所有勒索信"，要写"你已经拆开了那几封勒索信"）。上文我（系统）用"支线/主线/收束"只是和你沟通，绝不能照搬进写给玩家的文字。
 
 ## choices 要求
 - 恰好 **2 个选项**，每个是**具体行动**（不是态度/方向）
@@ -106,6 +107,7 @@ const BRIDGE_PROMPT = `你是一个互动影游的剧情过渡引擎。你的任
   - "无论你之前选择了哪条路"、"殊途同归"、"命运的齿轮"
   - "故事回到了主线"、"命运交汇"、"所有道路汇聚于此"
   - 任何暗示"多条路线合并"的表述
+  - ⚠️ **任何"游戏结构"元词汇**："支线""主线""分支""收束""剧情线""路线""玩家""选项""节点"——绝不能出现在 narration 里。复述玩家做过的事要用剧情内说法（写"你已经拆开了那几封勒索信"，不写"你已经在支线中拆开了勒索信"）。上文我用"支线/主线"只是和你沟通，不是给玩家看的词。
 - 要有具体的画面感：人物在做什么、看到什么、感受到什么
 - 叙述必须是具体的剧情推进，不能是抽象的命运感慨`;
 
@@ -529,6 +531,10 @@ export async function POST(request: NextRequest) {
     // Generate voice + TTS
     const { frames, voiceSegments } = await generateNodeContent(node, entities, style, defaultVoice || 'narrator');
 
+    // Scrub leaked game-structure meta vocabulary (支线/主线/收束…) from player-facing text.
+    node.data.narration = stripMetaVocabulary(node.data.narration || '');
+    (node.data.choices || []).forEach((ch: any) => { if (ch?.text) ch.text = stripMetaVocabulary(ch.text); });
+
     return {
       completed: {
         nodeId: node.id,
@@ -720,6 +726,10 @@ export async function POST(request: NextRequest) {
 
     // Step 2: Generate full content (storyboard + voice + TTS)
     const { frames, voiceSegments } = await generateNodeContent(node, entities, style, defaultVoice || 'narrator');
+
+    // Scrub leaked game-structure meta vocabulary (支线/主线/收束…) from player-facing text.
+    node.data.narration = stripMetaVocabulary(node.data.narration || '');
+    (node.data.choices || []).forEach((ch: any) => { if (ch?.text) ch.text = stripMetaVocabulary(ch.text); });
 
     return {
       completed: {

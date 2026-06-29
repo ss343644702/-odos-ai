@@ -201,3 +201,26 @@ export function sanitizeOutput(text: string): string {
 
   return result;
 }
+
+/**
+ * Defense-in-depth scrub of "game-structure" meta vocabulary that the generation LLM sometimes
+ * leaks into player-facing narration (e.g. "你已经在支线中拆开了所有勒索信"). The prompts forbid
+ * this, but LLMs aren't 100% reliable — this rewrites the most common offenders into in-fiction
+ * phrasing so the player never sees mechanics words like 支线/主线/收束/分支.
+ */
+export function stripMetaVocabulary(text: string): string {
+  if (!text) return text;
+  let r = text;
+  // Common phrases first (whole-phrase rewrites read better than word deletion).
+  r = r.replace(/在支线(中|里|上)/g, '');          // "你已经在支线中拆开…" → "你已经拆开…"
+  r = r.replace(/在主线(中|里|上)/g, '');
+  r = r.replace(/回到(故事)?主线/g, '继续向前');
+  r = r.replace(/(回归|收束到|收束回|汇聚到|汇入)主线/g, '继续向前');
+  r = r.replace(/(主线|支线)剧情/g, '剧情');
+  r = r.replace(/这条(支线|主线|路线|剧情线)/g, '眼前的局面');
+  // Bare structural nouns — drop the mechanics word, keep the sentence readable.
+  r = r.replace(/支线|主线|分支剧情|剧情线|故事线/g, '');
+  r = r.replace(/[，,、]\s*(?=[，,。！？])/g, '');   // tidy doubled punctuation left behind
+  r = r.replace(/^[，,、。\s]+/, '').replace(/\s{2,}/g, ' ');
+  return r.trim();
+}

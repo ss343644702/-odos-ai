@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { callLLM, parseJsonFromResponse } from '@/lib/claude';
-import { sanitizePlayerInput, wrapPlayerInput, moderateContent, sanitizeOutput } from '@/lib/safety';
+import { sanitizePlayerInput, wrapPlayerInput, moderateContent, sanitizeOutput, stripMetaVocabulary } from '@/lib/safety';
 import { checkRateLimit, getRateLimitKey, BRANCH_LIMIT } from '@/lib/rate-limit';
 import { synthesizeSpeech } from '@/lib/minimax-tts';
 import { uploadAudio, persistImageUrl } from '@/lib/oss';
@@ -98,6 +98,7 @@ const BRANCH_DECISION_PROMPT = `你是一个互动影游的实时剧情推理引
 - ✅ "你踹开仓库门。地上有拖拽痕迹，还有陈雅的围巾。手机突然响了，陌生号码。"（有发现有转折）
 - **严禁引用玩家尚未遇到的角色或事件**
 - ⚠️ **严禁暗示玩家还没做过的事**：不能写"比盘问埃德时更…""和上次搜书房一样""她比其他人都…"这类**对比/总结**，因为这暗示玩家已经盘问过埃德、搜过书房、问过其他人——而玩家此刻可能还没做。叙述只能基于【故事至此】里**真实发生过**的事；玩家没经历过的对比、回忆、"比某人如何"一律不许出现。
+- ⚠️ **严禁出现任何"游戏结构"元词汇**：narration 和选项里**绝对不能**出现"支线""主线""分支""收束""回到主线""剧情线""路线""玩家""选项""节点"这类词——它们会暴露游戏机制、破坏沉浸感。要用**剧情内的说法**复述玩家做过的事：不要写"你已经在支线中拆开了所有勒索信"，而要写"你已经拆开了那几封勒索信"。上文我（系统）用"支线/主线"只是和你沟通用，**绝不能照搬进你写给玩家的文字**。
 
 ## choices 要求（极重要）
 - 恰好 **2 个选项**，每个必须是**具体的行动**（不是方向/态度）
@@ -318,6 +319,7 @@ export async function POST(request: NextRequest) {
     if (decision.narration) {
       const modResult = moderateContent(decision.narration);
       if (!modResult.safe) decision.narration = sanitizeOutput(decision.narration);
+      decision.narration = stripMetaVocabulary(decision.narration); // scrub leaked 支线/主线/收束 etc.
     }
     if (decision.title) {
       const m = moderateContent(decision.title);
@@ -336,10 +338,12 @@ export async function POST(request: NextRequest) {
         if (c?.text) {
           const m = moderateContent(c.text);
           if (!m.safe) c.text = sanitizeOutput(c.text);
+          c.text = stripMetaVocabulary(c.text);
         }
         if (c?.converge_narration) {
           const m = moderateContent(c.converge_narration);
           if (!m.safe) c.converge_narration = sanitizeOutput(c.converge_narration);
+          c.converge_narration = stripMetaVocabulary(c.converge_narration);
         }
       }
     }
