@@ -6,35 +6,35 @@ export async function getOrCreateDbUser() {
   const authUser = await getUser();
   if (!authUser) return null;
 
-  let dbUser = await prisma.user.findUnique({
-    where: { supabaseId: authUser.id },
-  });
+  const email = authUser.email || null;
+  const metaNickname = authUser.user_metadata?.nickname || null;
+  const nickname = metaNickname || authUser.email?.split('@')[0] || '创作者';
+  const avatarUrl = authUser.user_metadata?.avatar_url || null;
 
-  if (!dbUser) {
-    dbUser = await prisma.user.create({
-      data: {
-        supabaseId: authUser.id,
-        email: authUser.email || null,
-        nickname: authUser.user_metadata?.nickname || authUser.email?.split('@')[0] || '创作者',
-        avatarUrl: authUser.user_metadata?.avatar_url || null,
+  try {
+    // Atomic upsert keyed on supabaseId. The old find-then-create was a race: /api/sessions and
+    // /api/me fire in parallel, both see "no user", both create → second fails P2002 on the unique
+    // email/supabaseId. Upsert (INSERT … ON CONFLICT (supabaseId)) collapses that to one row.
+    return await prisma.user.upsert({
+      where: { supabaseId: authUser.id },
+      create: { supabaseId: authUser.id, email, nickname, avatarUrl },
+      update: {
+        // keep avatar/nickname synced with Supabase, but never overwrite with null
+        ...(avatarUrl ? { avatarUrl } : {}),
+        ...(metaNickname ? { nickname } : {}),
       },
     });
-  } else {
-    // Sync profile fields from Supabase auth (avatar, nickname may change)
-    const newAvatar = authUser.user_metadata?.avatar_url || null;
-    const newNickname = authUser.user_metadata?.nickname || null;
-    const updates: Record<string, string | null> = {};
-    if (newAvatar && newAvatar !== dbUser.avatarUrl) updates.avatarUrl = newAvatar;
-    if (newNickname && newNickname !== dbUser.nickname) updates.nickname = newNickname;
-    if (Object.keys(updates).length > 0) {
-      dbUser = await prisma.user.update({
-        where: { id: dbUser.id },
-        data: updates,
-      });
+  } catch (e: any) {
+    // Still P2002 — either a concurrent upsert won the insert race, or this email already belongs
+    // to a DIFFERENT supabaseId. Recover instead of 500-ing.
+    if (e?.code === 'P2002') {
+      const existing = await prisma.user.findUnique({ where: { supabaseId: authUser.id } });
+      if (existing) return existing; // concurrent request created it — use that
+      // Email is owned by another account → create this user without the conflicting email.
+      return prisma.user.create({ data: { supabaseId: authUser.id, email: null, nickname, avatarUrl } });
     }
+    throw e;
   }
-
-  return dbUser;
 }
 
 /** Require auth — returns DB user or throws */
