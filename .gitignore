@@ -7,3 +7,9 @@ node_modules
 .env*.local
 
 /src/generated/prisma
+
+# OS / editor junk
+.DS_Store
+
+# One-off DB repair backups (created during data fixes — never commit)
+_backup_*.json

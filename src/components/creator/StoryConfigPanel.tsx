@@ -63,7 +63,9 @@ function ReadonlyField({ label, value }: { label: string; value: string }) {
   );
 }
 
-export default function StoryConfigPanel() {
+export type ConfigFocus = 'config' | 'characters' | 'scenes' | 'props';
+
+export default function StoryConfigPanel({ focus = 'config' }: { focus?: ConfigFocus }) {
   const paramPanelOpen = useEditorStore((s) => s.paramPanelOpen);
   const orchestrator = useChatStore((s) => s.orchestrator);
   const updateEntityField = useChatStore((s) => s.updateEntityField);
@@ -71,20 +73,15 @@ export default function StoryConfigPanel() {
   const addEntity = useChatStore((s) => s.addEntity);
   const removeEntity = useChatStore((s) => s.removeEntity);
   const updateOutlineField = useChatStore((s) => s.updateOutlineField);
-  const addOutlineCharacter = useChatStore((s) => s.addOutlineCharacter);
-  const removeOutlineCharacter = useChatStore((s) => s.removeOutlineCharacter);
-  const updateOutlineCharacter = useChatStore((s) => s.updateOutlineCharacter);
   const addOutlineEnding = useChatStore((s) => s.addOutlineEnding);
   const removeOutlineEnding = useChatStore((s) => s.removeOutlineEnding);
   const updateOutlineEnding = useChatStore((s) => s.updateOutlineEnding);
-  const addOutlinePlotPoint = useChatStore((s) => s.addOutlinePlotPoint);
-  const removeOutlinePlotPoint = useChatStore((s) => s.removeOutlinePlotPoint);
-  const updateOutlinePlotPoint = useChatStore((s) => s.updateOutlinePlotPoint);
   const story = useStoryStore((s) => s.story);
   const updateNode = useStoryStore((s) => s.updateNode);
   const updateSettings = useStoryStore((s) => s.updateSettings);
 
-  const [entityTab, setEntityTab] = useState<'characters' | 'scenes' | 'props'>('characters');
+  const isEntityFocus = focus === 'characters' || focus === 'scenes' || focus === 'props';
+  const entityTab: 'characters' | 'scenes' | 'props' = isEntityFocus ? focus : 'characters';
   const [generatingIds, setGeneratingIds] = useState<Set<string>>(new Set());
   const [addingEntity, setAddingEntity] = useState(false);
   const [newEntityName, setNewEntityName] = useState('');
@@ -199,7 +196,7 @@ export default function StoryConfigPanel() {
           updateEntityImage(type, id, pollData.imageUrl);
           break;
         }
-        if (pollData.status === 'failed') break;
+        if (pollData.status === 'failed' || pollData.status === 'moderated') break;
       }
     } finally {
       setGeneratingIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
@@ -235,7 +232,7 @@ export default function StoryConfigPanel() {
             className="text-[10px] font-bold px-2 py-0.5 rounded"
             style={{ background: 'var(--accent)', color: 'white' }}
           >
-            故事配置
+            {isEntityFocus ? entityTabLabels[entityTab] : '剧情'}
           </span>
         </div>
         <button
@@ -249,20 +246,11 @@ export default function StoryConfigPanel() {
         </button>
       </div>
 
+      {/* ===== Config focus: basic info / objective / outline ===== */}
+      {focus === 'config' && (<>
       {/* 0. Basic Info — editable */}
       <Section title="基本信息" icon="📝" defaultOpen={true}>
         <div className="px-4 pb-3 space-y-2">
-          <div>
-            <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>描述</span>
-            <textarea
-              value={story?.description || ''}
-              onChange={(e) => { if (story) useStoryStore.getState().setStory({ ...story, description: e.target.value, updatedAt: new Date().toISOString() }); }}
-              rows={2}
-              className="w-full px-2.5 py-1.5 rounded-lg text-xs resize-none mt-1"
-              style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
-              placeholder="故事简介..."
-            />
-          </div>
           <div>
             <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>世界观</span>
             <textarea
@@ -322,63 +310,6 @@ export default function StoryConfigPanel() {
         </div>
       </Section>
 
-      {/* 0.8 Settings — editable */}
-      <Section title="故事设置" icon="⚙️">
-        <div className="px-4 pb-3 space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>最大深度</span>
-            <input
-              type="number"
-              value={story?.settings?.maxDepth || 10}
-              onChange={(e) => updateSettings({ maxDepth: parseInt(e.target.value) || 10 })}
-              min={3} max={15}
-              className="w-16 px-2 py-1 rounded text-xs text-right"
-              style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
-            />
-          </div>
-          <div className="flex items-center justify-between">
-            <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>结局数量</span>
-            <input
-              type="number"
-              value={story?.settings?.endingCount || 3}
-              onChange={(e) => updateSettings({ endingCount: parseInt(e.target.value) || 3 })}
-              min={1} max={8}
-              className="w-16 px-2 py-1 rounded text-xs text-right"
-              style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
-            />
-          </div>
-        </div>
-      </Section>
-
-      {/* 1. Style — with selector */}
-      <Section title="画面风格" icon="🎨" defaultOpen={true}>
-        <div className="px-4 pb-3">
-          <select
-            value={style?.styleId || ''}
-            onChange={(e) => {
-              const selected = PRESET_STYLES.find(s => s.styleId === e.target.value);
-              if (selected) useStoryStore.getState().setStyle(selected);
-            }}
-            className="w-full px-2.5 py-1.5 rounded-lg text-xs mb-2"
-            style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
-          >
-            <option value="">选择风格...</option>
-            {PRESET_STYLES.map(s => (
-              <option key={s.styleId} value={s.styleId}>{s.styleName}</option>
-            ))}
-          </select>
-          {style && (
-            <>
-              <ReadonlyField label="色调" value={style.colorTone} />
-              <ReadonlyField label="光影" value={style.lightingStyle} />
-              <p className="text-[10px] leading-relaxed break-all" style={{ color: 'var(--text-muted)' }}>
-                {style.stylePromptPrefix}
-              </p>
-            </>
-          )}
-        </div>
-      </Section>
-
       {/* 2. Outline (editable) */}
       <Section title="剧本大纲" icon="📋">
         {outline ? (
@@ -402,119 +333,6 @@ export default function StoryConfigPanel() {
                 style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
               />
             </div>
-            <div className="flex items-center justify-between">
-              <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>层数</span>
-              <input
-                type="number"
-                value={outline.depth}
-                onChange={(e) => updateOutlineField('depth', parseInt(e.target.value) || 3)}
-                min={2} max={10}
-                className="w-16 px-2 py-1 rounded text-xs text-right"
-                style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
-              />
-            </div>
-
-            {/* Characters */}
-            <div>
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>角色</span>
-                <button
-                  onClick={() => addOutlineCharacter({ name: '', role: '', description: '', gender: 'other' })}
-                  className="text-[10px] px-1.5 py-0.5 rounded"
-                  style={{ color: 'var(--accent)', background: 'var(--accent-dim)' }}
-                >+ 添加</button>
-              </div>
-              <div className="space-y-2">
-                {outline.characters.map((c, i) => (
-                  <div key={i} className="p-2 rounded-lg space-y-1.5" style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border)' }}>
-                    <div className="flex gap-1.5">
-                      <input
-                        value={c.name}
-                        onChange={(e) => updateOutlineCharacter(i, 'name', e.target.value)}
-                        placeholder="名字"
-                        className="flex-1 px-2 py-1 rounded text-[11px]"
-                        style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
-                      />
-                      <input
-                        value={c.role}
-                        onChange={(e) => updateOutlineCharacter(i, 'role', e.target.value)}
-                        placeholder="角色定位"
-                        className="flex-1 px-2 py-1 rounded text-[11px]"
-                        style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
-                      />
-                      <button
-                        onClick={() => { if (confirm(`删除角色「${c.name || '未命名'}」？`)) removeOutlineCharacter(i); }}
-                        className="px-1.5 rounded text-[11px]"
-                        style={{ color: '#ef4444' }}
-                        title="删除"
-                      >×</button>
-                    </div>
-                    <textarea
-                      value={c.description}
-                      onChange={(e) => updateOutlineCharacter(i, 'description', e.target.value)}
-                      placeholder="角色描述..."
-                      rows={1}
-                      className="w-full px-2 py-1 rounded text-[11px] resize-none"
-                      style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
-                    />
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Plot Points */}
-            {(outline.plotPoints || []).length > 0 && (
-              <div>
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>情节点</span>
-                  <button
-                    onClick={() => addOutlinePlotPoint({ id: uuid(), title: '', description: '' })}
-                    className="text-[10px] px-1.5 py-0.5 rounded"
-                    style={{ color: 'var(--accent)', background: 'var(--accent-dim)' }}
-                  >+ 添加</button>
-                </div>
-                <div className="space-y-2">
-                  {(outline.plotPoints || []).map((p, i) => (
-                    <div key={p.id || i} className="p-2 rounded-lg space-y-1.5" style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border)' }}>
-                      <div className="flex gap-1.5 items-center">
-                        <span className="text-[10px] font-mono w-5 text-center flex-shrink-0" style={{ color: 'var(--text-muted)' }}>{i + 1}</span>
-                        <input
-                          value={p.title}
-                          onChange={(e) => updateOutlinePlotPoint(i, 'title', e.target.value)}
-                          placeholder="标题"
-                          className="flex-1 px-2 py-1 rounded text-[11px]"
-                          style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
-                        />
-                        <button
-                          onClick={() => { if (confirm(`删除情节点「${p.title || '未命名'}」？`)) removeOutlinePlotPoint(i); }}
-                          className="px-1.5 rounded text-[11px]"
-                          style={{ color: '#ef4444' }}
-                        >×</button>
-                      </div>
-                      <textarea
-                        value={p.description}
-                        onChange={(e) => updateOutlinePlotPoint(i, 'description', e.target.value)}
-                        placeholder="描述..."
-                        rows={2}
-                        className="w-full px-2 py-1 rounded text-[11px] resize-none"
-                        style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
-                      />
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-            {(outline.plotPoints || []).length === 0 && (
-              <div className="flex items-center justify-between">
-                <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>暂无情节点</span>
-                <button
-                  onClick={() => addOutlinePlotPoint({ id: uuid(), title: '', description: '' })}
-                  className="text-[10px] px-1.5 py-0.5 rounded"
-                  style={{ color: 'var(--accent)', background: 'var(--accent-dim)' }}
-                >+ 添加</button>
-              </div>
-            )}
-
             {/* Endings */}
             <div>
               <div className="flex items-center justify-between mb-1.5">
@@ -528,14 +346,15 @@ export default function StoryConfigPanel() {
               <div className="space-y-2">
                 {(outline.endings || []).map((e, i) => {
                   const typeColors: Record<string, string> = { best: '#22c55e', good: '#3b82f6', normal: '#a78bfa', bad: '#ef4444', hidden: '#f59e0b' };
+                  const etype = ((e.type as string) === 'neutral' ? 'normal' : e.type) as string; // legacy 'neutral' → 'normal'
                   return (
                     <div key={e.id || i} className="p-2 rounded-lg space-y-1.5" style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border)' }}>
                       <div className="flex gap-1.5 items-center">
                         <select
-                          value={e.type}
+                          value={etype}
                           onChange={(ev) => updateOutlineEnding(i, 'type', ev.target.value)}
                           className="text-[10px] px-1.5 py-1 rounded"
-                          style={{ background: `${typeColors[e.type] || '#888'}20`, color: typeColors[e.type] || '#888', border: 'none', fontWeight: 600 }}
+                          style={{ background: `${typeColors[etype] || '#888'}20`, color: typeColors[etype] || '#888', border: 'none', fontWeight: 600 }}
                         >
                           <option value="best">best</option>
                           <option value="good">good</option>
@@ -586,36 +405,21 @@ export default function StoryConfigPanel() {
           </div>
         )}
       </Section>
+      </>)}
 
-      {/* 3. Entities (editable) */}
-      <Section title="主体管理" icon="👤" defaultOpen={true}>
+      {/* ===== Entity focus: characters / scenes / props (one kind per card) ===== */}
+      {isEntityFocus && (
+      <Section title={entityTabLabels[entityTab]} icon="👤" defaultOpen={true}>
         {entities ? (
           <>
-            {/* Tab bar + add button */}
-            <div className="flex gap-1 mb-3">
-              {(['characters', 'scenes', 'props'] as const).map((tab) => {
-                const count = entities[tab]?.length || 0;
-                return (
-                  <button
-                    key={tab}
-                    onClick={() => { setEntityTab(tab); setAddingEntity(false); }}
-                    className="flex-1 text-xs py-1.5 rounded-lg transition-colors"
-                    style={{
-                      background: entityTab === tab ? 'var(--accent-dim)' : 'var(--bg-tertiary)',
-                      color: entityTab === tab ? 'var(--accent)' : 'var(--text-muted)',
-                      fontWeight: entityTab === tab ? 600 : 400,
-                    }}
-                  >
-                    {entityTabLabels[tab]} ({count})
-                  </button>
-                );
-              })}
+            {/* Add button */}
+            <div className="flex justify-end mb-3">
               <button
                 onClick={() => { setAddingEntity(!addingEntity); setNewEntityName(''); setNewEntityDesc(''); }}
-                className="w-8 text-sm rounded-lg flex items-center justify-center"
+                className="text-xs px-3 py-1.5 rounded-lg flex items-center gap-1"
                 style={{ background: 'var(--bg-tertiary)', color: 'var(--accent)' }}
                 title={`添加${entityTabLabels[entityTab]}`}
-              >+</button>
+              >+ 添加{entityTabLabels[entityTab]}</button>
             </div>
 
             {/* Inline add form */}
@@ -682,8 +486,7 @@ export default function StoryConfigPanel() {
                   isGenerating={generatingIds.has(entity.id)}
                   onUpdateField={(field, value) => updateEntityField(entityTab, entity.id, field, value)}
                   onRegenImage={() => {
-                    const ar = entityTab === 'characters' ? '3:4' : entityTab === 'scenes' ? '16:9' : '1:1';
-                    handleRegenImage(entityTab, entity.id, entity.imagePrompt, ar);
+                    handleRegenImage(entityTab, entity.id, entity.imagePrompt, '9:16');
                   }}
                   onImageClick={(url) => setLightboxImage(url)}
                   onRemove={() => {
@@ -711,8 +514,10 @@ export default function StoryConfigPanel() {
           </div>
         )}
       </Section>
+      )}
 
-      {/* 4. Voice config (editable) */}
+      {/* 4. Voice config — merged into the characters card */}
+      {focus === 'characters' && (
       <Section title="音色配置" icon="🎙️">
         {entities?.characters ? (
           <div className="space-y-2">
@@ -831,6 +636,7 @@ export default function StoryConfigPanel() {
           <p className="text-xs" style={{ color: 'var(--text-muted)' }}>尚未提取角色数据</p>
         )}
       </Section>
+      )}
 
       {/* Image Lightbox */}
       {lightboxImage && typeof document !== 'undefined' && createPortal(

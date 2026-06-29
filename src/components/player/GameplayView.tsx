@@ -2,11 +2,13 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { usePlayerStore } from '@/stores/playerStore';
-import { getDisplayFrames } from '@/types/story';
+import { getDisplayFrames, buildStoryline } from '@/types/story';
 import ChoicePanel from './ChoicePanel';
 import CustomInput from './CustomInput';
 import NarrationPlayer from './NarrationPlayer';
 import ButterflyLoading from './ButterflyLoading';
+import StoryProgressPanel, { ENDING_META } from './StoryProgressPanel';
+import { getEntityImageList } from '@/lib/entity-utils';
 import type { NarrationPlayerHandle } from './NarrationPlayer';
 import { useRouter } from 'next/navigation';
 
@@ -19,6 +21,37 @@ function isStubNode(node: any): boolean {
   const hasNarration = !!node.data?.narration;
   const hasVoice = (node.data?.voiceSegments?.length ?? 0) > 0;
   return !hasNarration && !hasVoice;
+}
+
+/**
+ * Order voice segments to match frame order, AND drop orphans so playback matches the editor panel.
+ *
+ * Two things happen here:
+ *  1. Ordering: addVoiceSegment appends new segments to the end, so a segment added to an earlier
+ *     frame can sit after later frames' segments — playback follows array order, so without sorting
+ *     it would play (and jump the visual back) after later frames.
+ *  2. Orphan removal: a segment whose frameId matches no current frame (e.g. frames were regenerated
+ *     with new ids while old segments kept stale frameIds) is INVISIBLE in the per-frame editor panel
+ *     (getSegmentsOfFrame only keeps frameId === frame.id) but, in the old logic, was mapped to
+ *     `frames.length` and played at the very end. We now drop these so playback == what the panel shows.
+ *
+ * Anchored mode (some segment has a frameId) only applies with ≥2 frames — with 0/1 frame the panel
+ * shows every segment, so we leave them untouched. Returns the original array reference when nothing
+ * changed to avoid render churn.
+ */
+function orderSegmentsByFrame(segs: any[], frames: any[]): any[] {
+  if (frames.length <= 1 || segs.length <= 1) return segs;
+  const order = new Map(frames.map((f: any, i: number) => [f.id, i]));
+  const anchored = segs.some((s: any) => s.frameId);
+  // In anchored mode, keep only segments that belong to an existing frame (mirror getSegmentsOfFrame).
+  const kept = anchored ? segs.filter((s: any) => s.frameId && order.has(s.frameId)) : segs;
+  const idxOf = (s: any) => (order.has(s.frameId) ? (order.get(s.frameId) as number) : frames.length);
+  const keyed = kept.map((s, i) => ({ s, i }));
+  keyed.sort((a, b) => (idxOf(a.s) - idxOf(b.s)) || (a.i - b.i)); // stable: frame order, then original order
+  const result = keyed.map((x) => x.s);
+  // Preserve reference identity when nothing was dropped or reordered.
+  if (result.length === segs.length && result.every((s, i) => s === segs[i])) return segs;
+  return result;
 }
 
 /** Check if a node has core content ready (narration + voice). Images are optional — don't block navigation. */
@@ -46,22 +79,33 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
   const [currentSegmentIndex, setCurrentSegmentIndex] = useState(0);
   const [waitingForNode, setWaitingForNode] = useState(false);
   const [waitingChoiceText, setWaitingChoiceText] = useState('');
+  const [waitFailed, setWaitFailed] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
+  const [showProgress, setShowProgress] = useState(false);
   const waitingPollRef = useRef<ReturnType<typeof setInterval>>(undefined);
   const waitingTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const typewriterRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const narrationRef = useRef<NarrationPlayerHandle>(null);
 
-  const voiceSegments = currentNode?.data.voiceSegments || [];
   const frames = currentNode ? getDisplayFrames(currentNode.data) : [];
+  const voiceSegments = orderSegmentsByFrame(currentNode?.data.voiceSegments || [], frames);
 
-  // Map segment index to a frame index
+  // Map a segment index to its frame index.
+  // Prefer the segment's frameId anchor (set at generation time). Fall back to the
+  // boundary search that mirrors syncFramesFromVoice for legacy data without anchors.
   const getFrameIndexForSegment = (segIdx: number): number => {
-    if (frames.length <= 1) return 0;
-    return Math.min(
-      Math.floor(segIdx * frames.length / Math.max(voiceSegments.length, 1)),
-      frames.length - 1
-    );
+    const F = frames.length;
+    if (F <= 1) return 0;
+    const anchorId = voiceSegments[segIdx]?.frameId;
+    if (anchorId) {
+      const fi = frames.findIndex((f: any) => f.id === anchorId);
+      if (fi >= 0) return fi;
+    }
+    const V = Math.max(voiceSegments.length, 1);
+    for (let i = F - 1; i >= 0; i--) {
+      if (Math.floor(i * V / F) <= segIdx) return i;
+    }
+    return 0;
   };
 
   // When voice segments exist, map segment → frame. When no voice, use segment index directly as frame index.
@@ -72,6 +116,35 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
   const currentImage = currentFrame?.imageUrl || currentNode?.data.imageUrl || undefined;
   const currentMediaType = (currentFrame as any)?.mediaType || 'image';
   const currentMediaUrl = (currentFrame as any)?.mediaUrl || null;
+  // A deferred frame whose image hasn't filled yet: it has its own imagePrompt but no imageUrl/media.
+  // We must NOT keep showing the previous frame's image for it (that's the "几个配音都是同一张图"
+  // symptom) — render a "生成中" hold instead until updateFrameImage backfills it.
+  const currentFramePending = !!currentFrame
+    && !currentFrame.imageUrl
+    && !(currentFrame as any).mediaUrl
+    && !!currentFrame.imagePrompt
+    && currentFrameIndex > 0;
+
+  // Eliminate white flash on image switch: only show an image once it's fully decoded,
+  // keeping the previous one visible meanwhile (no gap that exposes the page background).
+  const [shownImage, setShownImage] = useState<string | undefined>(currentImage);
+  useEffect(() => {
+    if (!currentImage) { setShownImage(undefined); return; }
+    const img = new Image();
+    img.src = currentImage;
+    if (img.complete) { setShownImage(currentImage); return; }
+    let cancelled = false;
+    img.onload = () => { if (!cancelled) setShownImage(currentImage); };
+    return () => { cancelled = true; };
+  }, [currentImage]);
+
+  // Preload all frame images of the current node so frame-to-frame switches are instant.
+  useEffect(() => {
+    const urls = (frames || []).map((f: any) => f?.imageUrl).filter(Boolean);
+    if (currentNode?.data?.imageUrl) urls.push(currentNode.data.imageUrl);
+    urls.forEach((u: string) => { const img = new Image(); img.src = u; });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentNode?.id]);
 
   // Video-voice sync: both must complete before advancing to next frame
   const videoEndedRef = useRef(false);
@@ -88,7 +161,8 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
       setCurrentSegmentIndex(nextSeg);
       // Resume narration from the next frame's first segment
       setTimeout(() => narrationRef.current?.playFromSegment(nextSeg), 100);
-    } else if (currentFrameIndex >= frames.length - 1) {
+    } else if (currentSegmentIndex >= voiceSegments.length - 1) {
+      // No more segments queued and we're on the last one → node is done
       setShowChoices(true);
     }
   };
@@ -126,6 +200,7 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
     const hasVoice = (currentNode?.data.voiceSegments?.length ?? 0) > 0;
     const hasNarration = !!(currentNode?.data.narration);
     setNarrationDone(!hasVoice);
+    setWaitFailed(false); // clear any stale "generation failed" state from the previous node
     if (!hasNarration && !hasVoice) {
       setShowChoices(true);
     } else {
@@ -154,12 +229,24 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
   }, [currentNode?.id, currentSegmentIndex]);
 
   const handleSegmentChange = useCallback((segIndex: number) => {
-    const nextFrameIdx = frames.length > 1
-      ? Math.min(Math.floor(segIndex * frames.length / Math.max(voiceSegments.length, 1)), frames.length - 1)
-      : 0;
-    const curFrameIdx = frames.length > 1
-      ? Math.min(Math.floor(currentSegmentIndex * frames.length / Math.max(voiceSegments.length, 1)), frames.length - 1)
-      : 0;
+    // Same boundary logic as getFrameIndexForSegment / syncFramesFromVoice (kept inline
+    // so this useCallback doesn't depend on a per-render function identity).
+    const frameOf = (seg: number): number => {
+      const F = frames.length;
+      if (F <= 1) return 0;
+      const anchorId = voiceSegments[seg]?.frameId;
+      if (anchorId) {
+        const fi = frames.findIndex((f: any) => f.id === anchorId);
+        if (fi >= 0) return fi;
+      }
+      const V = Math.max(voiceSegments.length, 1);
+      for (let i = F - 1; i >= 0; i--) {
+        if (Math.floor(i * V / F) <= seg) return i;
+      }
+      return 0;
+    };
+    const nextFrameIdx = frameOf(segIndex);
+    const curFrameIdx = frameOf(currentSegmentIndex);
 
     if (nextFrameIdx !== curFrameIdx) {
       // Voice reached next frame — pause narration, mark done, wait for video
@@ -178,26 +265,24 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
 
   const handleNarrationEnd = useCallback(() => {
     setNarrationDone(true);
-    // All voice segments done — mark voice done for current frame and try advance
+    // All voice segments have finished playing → the node is done. Terminate on the LAST
+    // SEGMENT, not the last frame: segment frameIds can be out of order / not end on the last
+    // frame (from edits), so a frame-based check could stall and loop forever.
     voiceDoneForFrameRef.current = true;
-    if (currentFrameIndex < frames.length - 1) {
-      // Find first segment of next frame
-      const nextSeg = voiceSegments.findIndex((_, i) => getFrameIndexForSegment(i) > currentFrameIndex);
-      pendingSegmentRef.current = nextSeg >= 0 ? nextSeg : currentFrameIndex + 1;
-      tryAdvanceFrame();
-    } else {
-      tryAdvanceFrame();
-    }
-  }, [currentFrameIndex, frames.length, voiceSegments]);
+    videoEndedRef.current = true;
+    pendingSegmentRef.current = null;
+    setShowChoices(true);
+  }, []);
 
-  // Show choices only when narration done, typewriter finished, last segment, and no video still playing
+  // Show choices once narration + typewriter are done on the last SEGMENT.
+  // Terminate on segment (linear), not frame: out-of-order/incomplete frame anchors must not stall.
   useEffect(() => {
     if (isTyping || !narrationDone) return;
     const isLastSegment = voiceSegments.length === 0 || currentSegmentIndex >= voiceSegments.length - 1;
     const isLastFrame = currentFrameIndex >= frames.length - 1;
     const lastFrameIsVideo = isLastFrame && currentMediaType === 'video';
-    // If last frame is a video, let tryAdvanceFrame/onEnded handle showChoices instead
-    if (isLastSegment && isLastFrame && !lastFrameIsVideo) {
+    // If the current frame is a video, let tryAdvanceFrame/onEnded handle showChoices instead
+    if (isLastSegment && !lastFrameIsVideo) {
       setShowChoices(true);
     }
   }, [isTyping, narrationDone, currentSegmentIndex, voiceSegments.length, currentFrameIndex, frames.length, currentMediaType]);
@@ -238,16 +323,24 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
           body: JSON.stringify({
             storyId: storyState?.id,
             nodes: [freshNode],
+            // Linear story-so-far up to the current node (from history) — excludes abandoned branches.
+            storyline: buildStoryline(
+              storyState?.nodes || [],
+              usePlayerStore.getState().session?.history || [],
+              usePlayerStore.getState().currentNode?.id || '',
+            ),
             worldView: storyState?.worldView || '',
-            mainPlotNodeIds: storyState?.nodes.filter((n) => n.type !== 'ai_generated').map((n) => n.id) || [],
-            mainPlotNodes: storyState?.nodes.filter((n) => n.type !== 'ai_generated').map((n) => ({
-              id: n.id, type: n.type, title: n.data.title, narration: n.data.narration?.slice(0, 100),
+            mainPlotNodeIds: storyState?.nodes.filter((n) => n.type !== 'ai_generated' && n.type !== 'story_config').map((n) => n.id) || [],
+            mainPlotNodes: storyState?.nodes.filter((n) => n.type !== 'ai_generated' && n.type !== 'story_config').map((n) => ({
+              id: n.id, type: n.type, title: n.data.title, narration: n.data.narration,
             })) || [],
             style: storyState?.style || null,
-            entities: null,
+            entities: storyState?.entities || null,
             defaultVoice: storyState?.settings?.defaultVoice || 'narrator',
             branchDepth: 1,
-            convergenceTarget: storyState?.nodes.filter((n) => n.type !== 'ai_generated').map((n) => n.id)?.[0] || '',
+            // story-config is nodes[0]; it must NOT be a convergence target or 继续 lands on a
+            // blank config node (white screen). Exclude it like the decision path already does.
+            convergenceTarget: storyState?.nodes.filter((n) => n.type !== 'ai_generated' && n.type !== 'story_config').map((n) => n.id)?.[0] || '',
           }),
         });
         if (!res.ok) continue;
@@ -274,7 +367,39 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
     if (waitingPollRef.current) { clearInterval(waitingPollRef.current); waitingPollRef.current = undefined; }
     if (waitingTimerRef.current) { clearTimeout(waitingTimerRef.current); waitingTimerRef.current = undefined; }
     setWaitingForNode(false);
+    setWaitFailed(false);
     usePlayerStore.getState().setBranching(false);
+  }, []);
+
+  // Generate ONE frame's image (submit + poll), writing it into the store. Bounded by timeoutMs.
+  // Used at click time: prefetch now generates content + voice but NOT images, so the chosen
+  // option's first-frame image is produced here — the only thing the player waits on.
+  const generateFrameImage = useCallback(async (nodeId: string, frame: any, timeoutMs = 20000) => {
+    const st = usePlayerStore.getState();
+    const ents = st.story?.entities || null;
+    const node = st.story?.nodes?.find((n) => n.id === nodeId);
+    try {
+      const imageList = ents ? getEntityImageList(ents as any, frame?.entityRefs, node?.data.character ?? null) : [];
+      const subRes = await fetch('/api/generate-image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: frame?.imagePrompt, aspectRatio: '9:16', image_list: imageList.length > 0 ? imageList : undefined }),
+      });
+      const sub = await subRes.json();
+      if (!sub?.taskId) return false;
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 1500));
+        const pollRes = await fetch(`/api/generate-image?taskId=${encodeURIComponent(sub.taskId)}`);
+        const pd = await pollRes.json();
+        if (pd?.status === 'completed' && pd.imageUrl) {
+          usePlayerStore.getState().updateFrameImage(nodeId, frame.id, pd.imageUrl);
+          return true;
+        }
+        if (pd?.status === 'failed' || pd?.status === 'moderated' || pd?.status === 'timeout') return false;
+      }
+    } catch { /* ignore — caller enters with the black fallback */ }
+    return false;
   }, []);
 
   // Handle choice selection — check if target is a stub, wait if needed
@@ -289,15 +414,34 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
     const targetNodeId = choice.targetNodeId;
     const targetNode = state.story?.nodes?.find((n) => n.id === targetNodeId);
 
-    // If target node has ALL content ready (narration + voice + images), navigate immediately
+    // Content ready (narration + voice)? Prefetch already produced it — the only thing left is the
+    // first-frame image. Generate it now (brief wait), THEN enter. Later frames fill afterwards.
     if (targetNode && isNodeReady(targetNode)) {
-      navigateToNode(targetNodeId, choice.text);
+      const firstFrame = (targetNode.data.frames || [])[0] as any;
+      const needsImage = firstFrame && !firstFrame.imageUrl && !firstFrame.mediaUrl && firstFrame.imagePrompt;
+      if (!needsImage) {
+        navigateToNode(targetNodeId, choice.text);
+        return;
+      }
+      setWaitFailed(false);
+      setWaitingForNode(true);
+      setWaitingChoiceText(choice.text || '');
+      (async () => {
+        await generateFrameImage(targetNodeId, firstFrame, 20000);
+        // Enter regardless of outcome — a missing image just shows the black backdrop and the
+        // deferred-fill effect keeps trying; never block the player on image generation.
+        setWaitingForNode(false);
+        usePlayerStore.getState().navigateToNode(targetNodeId, choice.text);
+      })();
       return;
     }
 
     // Target not fully ready — show ButterflyLoading and poll until complete
+    setWaitFailed(false);
     setWaitingForNode(true);
     setWaitingChoiceText(choice.text || '');
+    const startedAt = Date.now();
+    const HARD_CAP_MS = 60000; // give up after 60s of waiting (incl. on-demand retries)
     let onDemandStarted = false;
 
     const poll = setInterval(() => {
@@ -309,6 +453,17 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
         waitingPollRef.current = undefined;
         waitingTimerRef.current = undefined;
         usePlayerStore.getState().navigateToNode(targetNodeId, choice.text);
+        return;
+      }
+      // Hard cap: a node that never becomes ready (e.g. generation kept failing) must not spin
+      // forever. Stop, drop back to the choices, and let the player retry instead of hanging.
+      if (Date.now() - startedAt > HARD_CAP_MS) {
+        clearInterval(poll);
+        clearTimeout(onDemandTimer);
+        waitingPollRef.current = undefined;
+        waitingTimerRef.current = undefined;
+        setWaitingForNode(false);
+        setWaitFailed(true);
       }
     }, 500);
     waitingPollRef.current = poll;
@@ -329,12 +484,13 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
       }
     }, 15000);
     waitingTimerRef.current = onDemandTimer;
-  }, [navigateToNode, generateOnDemand]);
+  }, [navigateToNode, generateOnDemand, generateFrameImage]);
 
   const isEnding = currentNode?.type === 'ending';
 
-  // Achievement tracking: two badges per story, each only once, saved to server + localStorage
-  // Must be before any early return to respect React hooks order
+  // Achievement + ending-unlock tracking. Records the reached ending (for the Story Progress
+  // medals) and the two per-story badges, persisted to localStorage AND the server session.
+  // Must be before any early return to respect React hooks order.
   useEffect(() => {
     if (!isEnding || !story || !session || !currentNode) return;
 
@@ -342,19 +498,157 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
       || currentNode.data.metadata?.endingType === 'best'
       || currentNode.data.metadata?.tags?.includes('hidden_ending')
       || currentNode.data.metadata?.tags?.includes('best_ending');
-
     const badge = isHidden ? 'hiddenUnlocked' : 'completed';
-    const existing = JSON.parse(localStorage.getItem(`achievements_${story.id}`) || '{}');
-    if (existing[badge]) return; // already marked
 
-    const updated = { ...existing, [badge]: true };
-    localStorage.setItem(`achievements_${story.id}`, JSON.stringify(updated));
+    const key = `achievements_${story.id}`;
+    const existing = JSON.parse(localStorage.getItem(key) || '{}');
+    const unlocked = new Set<string>(Array.isArray(existing.unlockedEndings) ? existing.unlockedEndings : []);
+    const newUnlock = !unlocked.has(currentNode.id);
+    const newBadge = !existing[badge];
+    if (!newUnlock && !newBadge) return; // nothing changed
+
+    unlocked.add(currentNode.id);
+    const updated = { ...existing, [badge]: true, unlockedEndings: [...unlocked] };
+    localStorage.setItem(key, JSON.stringify(updated));
+    localStorage.setItem(`unlockedEndings_${story.id}`, JSON.stringify([...unlocked]));
     fetch(`/api/sessions/${session.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ achievements: updated }),
     }).catch(() => {});
   }, [isEnding, story, session, currentNode]);
+
+  // Persist progress (history + position) to the server session on every navigation.
+  useEffect(() => {
+    if (!session?.id) return;
+    fetch(`/api/sessions/${session.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ history: session.history, currentNodeId: session.currentNodeId }),
+    }).catch(() => {});
+  }, [session?.id, session?.history.length, session?.currentNodeId]);
+
+  // Persist the full set of dynamic (AI-generated) nodes to the session. These come from BOTH
+  // custom-input branching AND prefetch/on-demand generation (e.g. `ai_bridge_*` bridge nodes).
+  // Without this, bridge nodes live only in memory and vanish on reload/restore — which strands
+  // `goBack` (its history step points at a node no longer in story.nodes). The signature includes
+  // a readiness flag per node so a stub that later gets filled by prefetch is re-persisted.
+  //
+  // It also counts frames that already have an image (`imgFilled`): deferred frame images are
+  // generated client-side AFTER the node arrives (only frame 0 is rendered server-side), and
+  // updateFrameImage writes them into the store. Without imgFilled in the signature, those later
+  // images never re-persist, so on reload every segment of the node falls back to frame 0's image
+  // (symptom: "后面几个配音都是同一张图").
+  const dynamicNodeSig = (story?.nodes || [])
+    .filter((n) => n.type === 'ai_generated')
+    .map((n) => {
+      const frames = n.data.frames || [];
+      const imgFilled = frames.filter((f: any) => f.imageUrl || f.mediaUrl).length;
+      return `${n.id}:${n.data.narration ? 1 : 0}${n.data.voiceSegments?.length ? 1 : 0}${frames.length}:${imgFilled}`;
+    })
+    .join('|');
+  useEffect(() => {
+    if (!session?.id) return;
+    const st = usePlayerStore.getState().story;
+    if (!st) return;
+    const dynamicNodes = (st.nodes || []).filter((n) => n.type === 'ai_generated');
+    if (dynamicNodes.length === 0) return;
+    const dynIds = new Set(dynamicNodes.map((n) => n.id));
+    const dynamicEdges = (st.edges || []).filter((e: any) => dynIds.has(e.source) || dynIds.has(e.target));
+    fetch(`/api/sessions/${session.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dynamicNodes, dynamicEdges }),
+    }).catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.id, dynamicNodeSig]);
+
+  // Create a fresh DB session row for the current local session (used on replay/restart).
+  const createServerSession = useCallback(async () => {
+    const s = usePlayerStore.getState().session;
+    if (!s) return;
+    try {
+      const res = await fetch('/api/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ storyId: s.storyId, currentNodeId: s.currentNodeId, history: s.history }),
+      });
+      if (res.ok) {
+        const { id } = await res.json();
+        if (id) usePlayerStore.getState().setSessionServerId(id);
+      }
+    } catch { /* offline — localStorage only */ }
+  }, []);
+
+  // Fill in deferred frame images. The branch pipeline / click-time only render the FIRST frame's
+  // image; later frames come back with imagePrompt but no imageUrl. Generate them client-side.
+  //
+  // Self-healing: the dependency is a signature of which frames still need an image, so if a frame
+  // is still pending (effect got cancelled mid-flight, a poll timed out, etc.) this RE-RUNS and
+  // tries again instead of leaving a permanent black frame that never auto-updates. An in-flight
+  // Set guards against submitting the same frame twice.
+  const pendingFrameSig = (currentNode?.data.frames || [])
+    .filter((f: any) => !f.imageUrl && !f.mediaUrl && f.imagePrompt)
+    .map((f: any) => f.id)
+    .join(',');
+  const fillInFlightRef = useRef<Set<string>>(new Set());
+  // Reset the in-flight guard whenever the node changes, so a revisited node can retry its fills.
+  useEffect(() => { fillInFlightRef.current.clear(); }, [currentNode?.id]);
+  useEffect(() => {
+    const node = usePlayerStore.getState().currentNode;
+    if (!node) return;
+    const frames = node.data.frames || [];
+    const pending = frames.filter(
+      (f: any) => !f.imageUrl && !f.mediaUrl && f.imagePrompt && !fillInFlightRef.current.has(f.id),
+    );
+    if (pending.length === 0) return;
+
+    let cancelled = false;
+    (async () => {
+      const st = usePlayerStore.getState();
+      const ents = st.story?.entities || null;
+      for (const frame of pending) {
+        if (cancelled) return;
+        fillInFlightRef.current.add(frame.id);
+        try {
+          const imageList = ents ? getEntityImageList(ents as any, (frame as any).entityRefs, node.data.character ?? null) : [];
+          const subRes = await fetch('/api/generate-image', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              prompt: (frame as any).imagePrompt,
+              aspectRatio: '9:16',
+              image_list: imageList.length > 0 ? imageList : undefined,
+            }),
+          });
+          const sub = await subRes.json();
+          if (!sub?.taskId) { fillInFlightRef.current.delete(frame.id); continue; }
+          // Poll up to ~30s for this frame
+          let done = false;
+          for (let i = 0; i < 15; i++) {
+            await new Promise((r) => setTimeout(r, 2000));
+            if (cancelled) return; // keep it in-flight set? no — allow retry on next mount
+            const pollRes = await fetch(`/api/generate-image?taskId=${encodeURIComponent(sub.taskId)}`);
+            const pd = await pollRes.json();
+            if (pd?.status === 'completed' && pd.imageUrl) {
+              usePlayerStore.getState().updateFrameImage(node.id, (frame as any).id, pd.imageUrl);
+              done = true;
+              break;
+            }
+            if (pd?.status === 'failed' || pd?.status === 'moderated' || pd?.status === 'timeout') break;
+          }
+          // Release the guard. If it didn't succeed, the signature still lists this frame, so the
+          // effect re-runs and retries (covers transient failures / cancellations).
+          fillInFlightRef.current.delete(frame.id);
+          void done;
+        } catch {
+          fillInFlightRef.current.delete(frame.id);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentNode?.id, pendingFrameSig]);
 
   if (!currentNode || !story) {
     const hasNodes = (story?.nodes || []).filter(n => n.type !== 'story_config').length > 0;
@@ -375,72 +669,29 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
 
   const progress = session ? (session.history.length / ((story.nodes?.length || 1) * 0.6)) * 100 : 0;
 
+  // Transparent floating controls over full-bleed media — white icons with a soft drop-shadow
+  // so they stay legible over bright frames.
+  const frostedPill: React.CSSProperties = {
+    background: 'transparent',
+    border: 'none',
+    filter: 'drop-shadow(0 1px 3px rgba(0,0,0,0.55))',
+  };
+  const hasSpeaker = !!voiceSegments[currentSegmentIndex]?.speaker
+    && voiceSegments[currentSegmentIndex].speaker !== 'narrator';
+
   return (
     <div
-      className="min-h-screen flex flex-col"
+      className={`relative w-full overflow-hidden ${isPreview ? 'h-full' : 'h-[100dvh]'}`}
       style={{ background: 'var(--bg-primary)' }}
     >
-      {/* Progress bar */}
-      <div className="w-full h-1" style={{ background: 'var(--bg-tertiary)' }}>
-        <div
-          className="h-full transition-all duration-500"
-          style={{ width: `${Math.min(progress, 100)}%`, background: 'var(--accent)' }}
-        />
-      </div>
-
-      {/* Top bar */}
-      <div className="flex items-center gap-2 px-3 py-3">
-        {!isPreview && (
-          <button
-            onClick={() => { cancelAllGeneration(); router.push('/discover'); }}
-            className="p-1.5 rounded-full transition-colors"
-            style={{ color: 'var(--text-secondary)' }}
-            title="返回主页"
-          >
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M15 18l-6-6 6-6" />
-            </svg>
-          </button>
-        )}
-        <span className="text-sm font-medium flex-1 truncate" style={{ color: 'var(--text-primary)' }}>{story.title}</span>
-        {session && session.history.length > 0 && (
-          <button onClick={() => { cancelAllGeneration(); goBack(); }} className="p-1.5 rounded-full" style={{ color: 'var(--text-secondary)' }} title="撤回上一步">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M9 14L4 9l5-5" /><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" />
-            </svg>
-          </button>
-        )}
-        <button
-          onClick={() => {
-            narrationRef.current?.toggleMute();
-            setIsMuted((m) => !m);
-          }}
-          className="p-1.5 rounded-full"
-          style={{ color: isMuted ? 'var(--danger)' : 'var(--text-secondary)' }}
-          title={isMuted ? '取消静音' : '静音'}
-        >
-          {isMuted ? (
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-              <line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" />
-            </svg>
-          ) : (
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-              <path d="M19.07 4.93a10 10 0 0 1 0 14.14" /><path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
-            </svg>
-          )}
-        </button>
-      </div>
-
-      {/* Story media (image / video / GIF) */}
-      <div className="relative">
+      {/* ===== Media layer — full-bleed background ===== */}
+      <div className="absolute inset-0">
         {currentMediaType === 'video' && currentMediaUrl ? (
           <video
             ref={videoRef}
             key={currentMediaUrl}
             src={currentMediaUrl}
-            className="w-full aspect-[4/3] object-cover"
+            className="w-full h-full object-cover"
             autoPlay playsInline muted={isMuted}
             onEnded={() => {
               videoEndedRef.current = true;
@@ -455,47 +706,103 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
             }}
           />
         ) : currentMediaType === 'gif' && currentMediaUrl ? (
-          <img src={currentMediaUrl} alt="" className="w-full aspect-[4/3] object-cover" />
+          <img src={currentMediaUrl} alt="" className="w-full h-full object-cover" />
         ) : (
-          <div
-            className="w-full aspect-[4/3] flex items-center justify-center transition-all duration-500"
-            style={{
-              background: currentImage
-                ? `url(${currentImage}) center/cover`
-                : 'linear-gradient(135deg, var(--bg-tertiary), var(--bg-secondary))',
-            }}
-          >
-            {!currentImage && <div className="text-5xl opacity-30">🎬</div>}
-          </div>
-        )}
-
-        {voiceSegments.length > 1 && (
-          <div className="absolute bottom-2 left-0 right-0 flex justify-center gap-1.5">
-            {voiceSegments.map((_, i) => (
-              <span
-                key={i}
-                onClick={() => {
-                  setCurrentSegmentIndex(i);
-                  setDisplayedText(voiceSegments[i]?.text || '');
-                  setIsTyping(false);
-                  // Hide choices when switching to non-last segment
-                  if (i < voiceSegments.length - 1) {
-                    setShowChoices(false);
-                  }
-                  narrationRef.current?.playFromSegment(i);
-                }}
-                className="w-2 h-2 rounded-full transition-all cursor-pointer"
-                style={{
-                  background: i === currentSegmentIndex ? 'var(--accent)' : 'rgba(0,0,0,0.15)',
-                  transform: i === currentSegmentIndex ? 'scale(1.3)' : 'scale(1)',
-                }}
+          // No image (yet) — show a plain black backdrop. When a deferred frame's image is still
+          // generating (currentFramePending) we deliberately show black rather than the previous
+          // frame's stale image; no spinner or placeholder.
+          <div className="w-full h-full" style={{ background: '#000' }}>
+            {shownImage && !currentFramePending && (
+              <img
+                src={shownImage}
+                alt=""
+                className="absolute inset-0 w-full h-full object-cover"
               />
-            ))}
+            )}
           </div>
         )}
       </div>
 
-      {/* Narration Player */}
+      {/* ===== Top controls ===== */}
+      <div className="absolute top-0 inset-x-0 z-20">
+        {/* Progress bar */}
+        <div className="w-full h-1" style={{ background: 'rgba(20,20,19,0.08)' }}>
+          <div
+            className="h-full transition-all duration-500"
+            style={{ width: `${Math.min(progress, 100)}%`, background: 'var(--accent)' }}
+          />
+        </div>
+
+        {/* Floating control row */}
+        <div className="flex items-center gap-2 px-3 py-3">
+          {!isPreview && (
+            <button
+              onClick={() => { cancelAllGeneration(); router.push('/discover'); }}
+              className="p-2 rounded-full transition-transform active:scale-95"
+              style={{ ...frostedPill, color: '#fff' }}
+              title="返回主页"
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M15 18l-6-6 6-6" />
+              </svg>
+            </button>
+          )}
+          <span
+            className="text-sm font-semibold flex-1 truncate px-1"
+            style={{ color: '#ffffff', textShadow: '0 1px 4px rgba(0,0,0,0.6), 0 0 8px rgba(0,0,0,0.4)' }}
+          >
+            {story.title}
+          </span>
+          {!isPreview && (
+            <button
+              onClick={() => setShowProgress(true)}
+              className="p-2 rounded-full transition-transform active:scale-95"
+              style={{ ...frostedPill, color: '#fff' }}
+              title="故事进度"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
+                <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+              </svg>
+            </button>
+          )}
+          {session && session.history.length > 0 && (
+            <button
+              onClick={() => { cancelAllGeneration(); goBack(); }}
+              className="p-2 rounded-full transition-transform active:scale-95"
+              style={{ ...frostedPill, color: '#fff' }}
+              title="撤回上一步"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M9 14L4 9l5-5" /><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" />
+              </svg>
+            </button>
+          )}
+          <button
+            onClick={() => {
+              narrationRef.current?.toggleMute();
+              setIsMuted((m) => !m);
+            }}
+            className="p-2 rounded-full transition-transform active:scale-95"
+            style={{ ...frostedPill, color: '#fff' }}
+            title={isMuted ? '取消静音' : '静音'}
+          >
+            {isMuted ? (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                <line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" />
+              </svg>
+            ) : (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                <path d="M19.07 4.93a10 10 0 0 1 0 14.14" /><path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+              </svg>
+            )}
+          </button>
+        </div>
+      </div>
+
+      {/* Narration Player (audio only, no visual footprint) */}
       <NarrationPlayer
         ref={narrationRef}
         nodeId={currentNode.id}
@@ -504,106 +811,140 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
         onSegmentChange={handleSegmentChange}
       />
 
-      {/* Skip button */}
-      {!showChoices && currentNode && (
-        <div className="flex justify-end px-5 pt-2">
-          <button
-            onClick={handleTap}
-            className="px-3 py-1 rounded-full text-[11px] transition-opacity"
-            style={{
-              background: 'var(--bg-tertiary)',
-              color: 'var(--text-muted)',
-              border: '1px solid var(--border)',
-            }}
-          >
-            跳过 ▶▶
-          </button>
-        </div>
-      )}
-
-      {/* Text content */}
-      <div className="flex-1 px-5 py-4">
-        {currentNode.data.dialogue && currentNode.data.character && showChoices && (
-          <div className="mb-4">
-            <span
-              className="text-xs font-medium px-2 py-0.5 rounded"
-              style={{ background: 'var(--accent-dim)', color: 'var(--accent)' }}
-            >
-              {currentNode.data.character}
-            </span>
-            <p
-              className="mt-2 text-sm italic leading-relaxed"
-              style={{ color: 'var(--text-primary)', borderLeft: '2px solid var(--accent)', paddingLeft: 12 }}
-            >
-              {currentNode.data.dialogue}
-            </p>
-          </div>
-        )}
-
-        {/* Speaker label for character segments */}
-        {voiceSegments[currentSegmentIndex]?.speaker &&
-         voiceSegments[currentSegmentIndex].speaker !== 'narrator' && (
-          <span
-            className="text-xs font-medium px-2 py-0.5 rounded mb-2 inline-block"
-            style={{ background: 'var(--accent-dim)', color: 'var(--accent)' }}
-          >
-            {voiceSegments[currentSegmentIndex].speaker}
-          </span>
-        )}
-        <p
-          className={`text-sm leading-relaxed ${isTyping ? 'cursor-blink' : ''}`}
-          style={{
-            color: 'var(--text-primary)',
-            fontStyle: voiceSegments[currentSegmentIndex]?.speaker && voiceSegments[currentSegmentIndex].speaker !== 'narrator' ? 'italic' : 'normal',
-            borderLeft: voiceSegments[currentSegmentIndex]?.speaker && voiceSegments[currentSegmentIndex].speaker !== 'narrator' ? '2px solid var(--accent)' : 'none',
-            paddingLeft: voiceSegments[currentSegmentIndex]?.speaker && voiceSegments[currentSegmentIndex].speaker !== 'narrator' ? 12 : 0,
-          }}
-        >
-          {displayedText}
-        </p>
-
-        {isEnding && showChoices && (
-          <div className="mt-6 text-center">
-            <div className="text-lg font-bold mb-2" style={{ color: 'var(--node-ending)' }}>
-              {currentNode.data.title}
-            </div>
-            <p className="text-xs" style={{ color: 'var(--text-muted)' }}>— 故事结束 —</p>
+      {/* ===== Bottom overlay: skip / subtitle / choices ===== */}
+      <div
+        className="absolute inset-x-0 bottom-0 z-20 px-5"
+        style={{ paddingBottom: 'calc(env(safe-area-inset-bottom) + 18px)' }}
+      >
+        {/* Skip button */}
+        {!showChoices && currentNode && (
+          <div className="flex justify-end pb-2">
             <button
-              onClick={() => { if (story) usePlayerStore.getState().initSession(story); }}
-              className="mt-4 px-6 py-2 rounded-lg text-sm"
-              style={{ background: 'var(--accent)', color: 'white' }}
+              onClick={handleTap}
+              className="px-2 py-1 text-[11px] transition-transform active:scale-95"
+              style={{ color: '#ffffff', textShadow: '0 1px 4px rgba(0,0,0,0.7), 0 0 8px rgba(0,0,0,0.45)' }}
             >
-              重新开始
+              跳过 ▶▶
             </button>
           </div>
         )}
+
+        {/* Subtitle text.
+            During playback (no choices yet): a reserved fixed-height slot so the text doesn't jump
+            as segments swap (rem, not %: parent has no explicit height, so % would collapse to auto
+            and let text grow bottom-up). Text fills top-down.
+            Once choices are shown: switch to auto height (capped + scroll). This lets the narration
+            hug its own content so the choices sit directly beneath it — a short narration no longer
+            leaves a big empty gap between text and choices, and a long one scrolls within the cap. */}
+        <div
+          className="fade-in overflow-y-auto hide-scrollbar"
+          key={`${currentNode.id}-${currentSegmentIndex}`}
+          style={showChoices && !isEnding ? { maxHeight: '7.5rem' } : { height: '7.5rem' }}
+        >
+          {/* Speaker label for character segments */}
+          {hasSpeaker && (
+            <span
+              className="text-xs font-semibold px-2 py-0.5 rounded mb-2 inline-block"
+              style={{ background: 'var(--accent-dim)', color: 'var(--accent)' }}
+            >
+              {voiceSegments[currentSegmentIndex].speaker}
+            </span>
+          )}
+          <p
+            className={`text-[15px] leading-relaxed ${isTyping ? 'cursor-blink' : ''}`}
+            style={{
+              color: '#ffffff',
+              textShadow: '0 1px 4px rgba(0,0,0,0.7), 0 0 8px rgba(0,0,0,0.45)',
+              fontStyle: hasSpeaker ? 'italic' : 'normal',
+              borderLeft: hasSpeaker ? '2px solid var(--accent)' : 'none',
+              paddingLeft: hasSpeaker ? 12 : 0,
+            }}
+          >
+            {displayedText}
+          </p>
+        </div>
+
+        {/* Ending */}
+        {isEnding && showChoices && !isTyping && (() => {
+          const meta = ENDING_META[currentNode.data.metadata?.endingType || 'normal'] || ENDING_META.normal;
+          return (
+            <div className="mt-5 text-center fade-in">
+              {/* Ending rating tag (Best / Good / Normal / Bad / Hidden) */}
+              <span
+                className="inline-block text-[11px] font-bold tracking-wide px-2.5 py-0.5 rounded-full mb-2"
+                style={{ background: `${meta.color}22`, color: meta.color, border: `1px solid ${meta.color}` }}
+              >
+                {meta.label} ENDING
+              </span>
+              <div className="text-lg font-bold mb-1" style={{ color: 'var(--node-ending)' }}>
+                {currentNode.data.title}
+              </div>
+              <p className="text-xs" style={{ color: 'var(--text-muted)' }}>— 故事结束 —</p>
+              <button
+                onClick={() => { if (story) { usePlayerStore.getState().initSession(story); createServerSession(); } }}
+                className="mt-4 px-6 py-2 rounded-lg text-sm"
+                style={{ background: 'var(--accent)', color: 'white' }}
+              >
+                重新开始
+              </button>
+            </div>
+          );
+        })()}
+
+        {/* Choices — only after the typewriter has fully revealed the text */}
+        {showChoices && !isEnding && !isTyping && (
+          <div
+            className="mt-3 fade-in overflow-y-auto hide-scrollbar"
+            style={{ maxHeight: '17rem' }}
+          >
+            {waitingForNode ? (
+              <div
+                className="rounded-xl overflow-hidden"
+                style={{ background: 'rgba(240,238,230,0.85)', border: '1px solid var(--border-strong)' }}
+              >
+                <ButterflyLoading prefix={waitingChoiceText} />
+              </div>
+            ) : waitFailed ? (
+              <div
+                className="rounded-xl px-4 py-3 text-center fade-in"
+                style={{ background: 'rgba(240,238,230,0.92)', border: '1px solid var(--border-strong)' }}
+              >
+                <p className="text-[13px] mb-2" style={{ color: 'var(--text-secondary)' }}>这一步生成失败了，请重试</p>
+                <ChoicePanel
+                  choices={(currentNode.data.choices || []).filter((c: any) => !c.visibility || c.visibility !== 'hidden')}
+                  onChoose={(id) => { setWaitFailed(false); handleChoose(id); }}
+                  showHiddenBadge={false}
+                />
+              </div>
+            ) : (
+              <>
+                <ChoicePanel
+                  choices={isPreview
+                    ? (currentNode.data.choices || [])
+                    : (currentNode.data.choices || []).filter((c: any) => !c.visibility || c.visibility !== 'hidden')
+                  }
+                  onChoose={handleChoose}
+                  showHiddenBadge={isPreview}
+                />
+              </>
+            )}
+          </div>
+        )}
+        {/* CustomInput is rendered for EVERY node (not just when choices show) so its background
+            prefetch fires on node ENTRY — overlapping generation with the narration the player is
+            reading, instead of only starting after choices appear. The input box itself shows only
+            when it's actually the player's turn to type. */}
+        {!isPreview && currentNode && (
+          <CustomInput
+            nodeId={currentNode.id}
+            storyId={story.id}
+            canInput={showChoices && !isEnding && !isTyping && !waitingForNode && !waitFailed && !!currentNode.data.allowCustomInput}
+          />
+        )}
       </div>
 
-      {/* Choice panel */}
-      {showChoices && !isEnding && (
-        <div className="px-5 pb-6">
-          {waitingForNode ? (
-            <div
-              className="rounded-xl overflow-hidden"
-              style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border)' }}
-            >
-              <ButterflyLoading prefix={waitingChoiceText} />
-            </div>
-          ) : (
-            <>
-              <ChoicePanel
-                choices={isPreview
-                  ? (currentNode.data.choices || [])
-                  : (currentNode.data.choices || []).filter((c: any) => !c.visibility || c.visibility !== 'hidden')
-                }
-                onChoose={handleChoose}
-                showHiddenBadge={isPreview}
-              />
-              {!isPreview && <CustomInput nodeId={currentNode.id} storyId={story.id} />}
-            </>
-          )}
-        </div>
-      )}
+      {/* Story progress panel */}
+      {showProgress && <StoryProgressPanel onClose={() => setShowProgress(false)} />}
     </div>
   );
 }

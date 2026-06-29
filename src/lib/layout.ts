@@ -44,8 +44,8 @@ export function layoutNodes(nodes: StoryNode[], edges: StoryEdge[]): StoryNode[]
   }
 
   // Left-to-right layout: x = depth * horizontalSpacing, y = index * verticalSpacing
-  const HORIZONTAL_SPACING = 400;
-  const VERTICAL_SPACING = 280;
+  const HORIZONTAL_SPACING = 520;
+  const VERTICAL_SPACING = 360;
 
   // Find max nodes in any column for centering
   let maxNodesInColumn = 0;

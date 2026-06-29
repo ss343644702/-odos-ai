@@ -68,7 +68,44 @@ export interface Frame {
   duration: number;           // 建议展示时长（秒），默认 3
 }
 
-/** 语音生成后，将 voiceSegments 文字回写到 frames 的 narrationSegment */
+/** 将每个配音段按比例钉到对应帧（生成时调用一次，写入 frameId 锚点）。
+ *  之后增删段不会再让其他段漂移——因为归属由 frameId 决定，而非数组位置比例。 */
+export function assignSegmentFrames(frames: Frame[], voiceSegments: VoiceSegment[]): VoiceSegment[] {
+  const F = frames.length;
+  const V = voiceSegments.length;
+  if (F === 0 || V === 0) return voiceSegments;
+  if (F === 1) return voiceSegments.map((s) => ({ ...s, frameId: frames[0].id }));
+  return voiceSegments.map((s, i) => {
+    // 与历史比例边界一致：段 i 属于 floor(i*F/V) 那一帧
+    const fi = Math.min(Math.floor(i * F / V), F - 1);
+    return { ...s, frameId: frames[fi].id };
+  });
+}
+
+/** 取某一帧拥有的配音段（带原始下标）。优先用 frameId 锚点；旧数据无锚点时回退按比例切片。 */
+export function getSegmentsOfFrame(
+  frames: Frame[],
+  voiceSegments: VoiceSegment[],
+  frameIndex: number,
+): { seg: VoiceSegment; globalIndex: number }[] {
+  const F = frames.length;
+  const V = voiceSegments.length;
+  if (F === 0 || V === 0 || frameIndex < 0 || frameIndex >= F) return [];
+  const frameId = frames[frameIndex].id;
+  const anchored = voiceSegments.some((s) => s.frameId);
+  if (anchored) {
+    return voiceSegments
+      .map((seg, globalIndex) => ({ seg, globalIndex }))
+      .filter(({ seg }) => seg.frameId === frameId);
+  }
+  // Legacy fallback: proportional slice
+  const start = Math.floor(frameIndex * V / F);
+  const end = Math.floor((frameIndex + 1) * V / F);
+  return voiceSegments.slice(start, end).map((seg, j) => ({ seg, globalIndex: start + j }));
+}
+
+/** 语音生成后，将 voiceSegments 文字回写到 frames 的 narrationSegment。
+ *  优先按 frameId 锚点分组；旧数据无锚点时回退按比例。 */
 export function syncFramesFromVoice(frames: Frame[], voiceSegments: VoiceSegment[]): Frame[] {
   if (frames.length === 0 || voiceSegments.length === 0) return frames;
 
@@ -78,12 +115,63 @@ export function syncFramesFromVoice(frames: Frame[], voiceSegments: VoiceSegment
     return [{ ...frames[0], narrationSegment: fullText }];
   }
 
+  const anchored = voiceSegments.some((s) => s.frameId);
+  if (anchored) {
+    return frames.map((f) => {
+      const text = voiceSegments.filter((s) => s.frameId === f.id).map((s) => s.text).join('\n');
+      return { ...f, narrationSegment: text || f.narrationSegment };
+    });
+  }
+
   return frames.map((f, i) => {
     const startSeg = Math.floor(i * voiceSegments.length / frames.length);
     const endSeg = Math.floor((i + 1) * voiceSegments.length / frames.length);
     const text = voiceSegments.slice(startSeg, endSeg).map((s) => s.text).join('\n');
     return { ...f, narrationSegment: text || f.narrationSegment };
   });
+}
+
+/** 构建「线性已走故事线」：严格按 PlaySession.history 的顺序拼接每个节点的叙述（再加上当前节点）。
+ *  ⚠️ 必须基于 history（线性路径），不能基于所有生成过的节点——history 经 goBack 会 pop 掉被放弃的
+ *  分支尝试，所以这里得到的是「从故事起点到当前节点」真正经历的那一条线，不含放弃的兄弟分支，避免
+ *  把矛盾的支线情节喂给 LLM。超长时保留开场 + 最近部分。 */
+export function buildStoryline(
+  nodes: { id: string; data: { title?: string; narration?: string } }[],
+  history: { nodeId: string; customInput?: string | null }[],
+  currentNodeId: string,
+  maxChars = 9000,
+): string {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const parts: string[] = [];
+  const seen = new Set<string>();
+  const pushNode = (id: string, customInput?: string | null) => {
+    if (seen.has(id)) return;
+    seen.add(id);
+    const n = byId.get(id);
+    const narr = (n?.data?.narration || '').trim();
+    if (narr) parts.push(narr);
+    if (customInput) parts.push(`（你的选择：${customInput}）`);
+  };
+  for (const step of history || []) pushNode(step.nodeId, step.customInput);
+  pushNode(currentNodeId); // current node isn't in history yet
+  const full = parts.join('\n');
+  if (full.length <= maxChars) return full;
+  // Too long: keep the opening (first ~1500 chars) + the most recent (rest of the budget).
+  const head = full.slice(0, 1500);
+  const tail = full.slice(full.length - (maxChars - 1500));
+  return `${head}\n……（中间剧情略）……\n${tail}`;
+}
+
+/** 删除「孤儿配音段」：frameId 指向已不存在帧的段。仅在 ≥2 帧且存在锚点时生效，
+ *  与编辑器面板 getSegmentsOfFrame 的可见性规则保持一致（0/1 帧时面板会显示全部段，故不处理）。
+ *  无变化时返回原数组引用。 */
+export function dropOrphanSegments(frames: Frame[], voiceSegments: VoiceSegment[]): VoiceSegment[] {
+  if (frames.length < 2 || voiceSegments.length === 0) return voiceSegments;
+  const anchored = voiceSegments.some((s) => s.frameId);
+  if (!anchored) return voiceSegments;
+  const ids = new Set(frames.map((f) => f.id));
+  const kept = voiceSegments.filter((s) => s.frameId && ids.has(s.frameId));
+  return kept.length === voiceSegments.length ? voiceSegments : kept;
 }
 
 /** 兼容 helper: 优先返回 frames，否则从 imageUrl/imagePrompt 合成单帧 */
@@ -143,6 +231,7 @@ export interface VoiceSegment {
   emotion: string;
   speed: number;
   audioUrl?: string | null;
+  frameId?: string | null; // 该段归属的帧 id（锚点）；缺省时回退按比例映射
 }
 
 export type VoiceType =

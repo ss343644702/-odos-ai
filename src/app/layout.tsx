@@ -5,7 +5,7 @@ import './globals.css';
 const inter = Inter({ subsets: ['latin'], variable: '--font-inter' });
 
 export const metadata: Metadata = {
-  title: 'Odos AI',
+  title: 'Oii 互动',
   description: 'AI 驱动的互动故事创作与体验平台',
 };
 

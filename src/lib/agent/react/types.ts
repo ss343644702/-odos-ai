@@ -60,7 +60,8 @@ export interface ReactModelConfig {
 }
 
 export const DEFAULT_REACT_CONFIG: ReactModelConfig = {
-  modelId: 'deepseek-chat',
+  // 空串 → 回落到 claude.ts 的 LLM_MODEL_FLASH（env 驱动，不在此硬编码模型名）
+  modelId: '',
   maxTurns: 30,
   temperature: 0.3,
   maxTokens: 2048,

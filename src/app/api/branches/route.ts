@@ -1,9 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { callLLM } from '@/lib/claude';
+import { checkRateLimit, getRateLimitKey, BRANCH_LIMIT } from '@/lib/rate-limit';
 
 // GET /api/branches?storyId=&parentNodeId=&input= — find reusable branch
 export async function GET(request: NextRequest) {
+  const rlKey = getRateLimitKey(request);
+  if (!checkRateLimit(`branches-get:${rlKey}`, BRANCH_LIMIT).allowed) {
+    return NextResponse.json({ branch: null }, { status: 429 });
+  }
+
   const { searchParams } = new URL(request.url);
   const storyId = searchParams.get('storyId');
   const parentNodeId = searchParams.get('parentNodeId');
@@ -71,6 +77,11 @@ export async function GET(request: NextRequest) {
 
 // POST /api/branches — save a generated branch
 export async function POST(request: NextRequest) {
+  const rlKey = getRateLimitKey(request);
+  if (!checkRateLimit(`branches-post:${rlKey}`, BRANCH_LIMIT).allowed) {
+    return NextResponse.json({ error: 'rate_limited' }, { status: 429 });
+  }
+
   const body = await request.json();
 
   const branch = await prisma.generatedBranch.create({

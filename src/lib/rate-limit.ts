@@ -97,6 +97,12 @@ export const CHAT_LIMIT: RateLimitConfig = {
   windowMs: 60 * 1000,
 };
 
+/** Branch prefetch (background lookahead, fires automatically + per-choice): 40 requests per minute per IP */
+export const PREFETCH_LIMIT: RateLimitConfig = {
+  maxRequests: 40,
+  windowMs: 60 * 1000,
+};
+
 // ──────────────────────────────────────────────
 // Helper to extract rate limit key from request
 // ──────────────────────────────────────────────

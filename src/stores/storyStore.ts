@@ -11,6 +11,7 @@ import type {
   StyleConfig,
   EntityCollection,
 } from '@/types/story';
+import { assignSegmentFrames, dropOrphanSegments } from '@/types/story';
 
 interface StoryState {
   story: Story | null;
@@ -117,7 +118,17 @@ export const useStoryStore = create<StoryState>()(persist((set, get) => ({
 
   setStory: (story) => {
     const hist = pushHistory(get());
-    set({ story: { ...story, updatedAt: new Date().toISOString() }, ...hist });
+    // Self-heal: strip orphaned voice segments (frameId pointing at a frame that no longer exists,
+    // e.g. left behind when frames were regenerated with new ids). They are invisible in the
+    // per-frame panel but would otherwise be saved and played back. Cleaned on load so the next
+    // save persists the fix.
+    const nodes = (story.nodes || []).map((n) => {
+      const segs = n.data?.voiceSegments;
+      if (!segs || segs.length === 0) return n;
+      const cleaned = dropOrphanSegments(n.data.frames || [], segs);
+      return cleaned === segs ? n : { ...n, data: { ...n.data, voiceSegments: cleaned } };
+    });
+    set({ story: { ...story, nodes, updatedAt: new Date().toISOString() }, ...hist });
   },
 
   updateTitle: (title) => {
@@ -404,6 +415,11 @@ export const useStoryStore = create<StoryState>()(persist((set, get) => ({
                 data: {
                   ...n.data,
                   frames: (n.data.frames || []).filter((f) => f.id !== frameId),
+                  // Drop voice segments anchored to the removed frame — otherwise they
+                  // become orphans: hidden in the per-frame panel but still played back
+                  // (the player iterates all segments and maps unmatched frameIds to the
+                  // last frame).
+                  voiceSegments: (n.data.voiceSegments || []).filter((v) => v.frameId !== frameId),
                 },
               }
             : n
@@ -421,11 +437,28 @@ export const useStoryStore = create<StoryState>()(persist((set, get) => ({
     set({
       story: {
         ...story,
-        nodes: (story.nodes || []).map((n) =>
-          n.id === nodeId
-            ? { ...n, data: { ...n.data, voiceSegments: [...(n.data.voiceSegments || []), segment] } }
-            : n
-        ),
+        nodes: (story.nodes || []).map((n) => {
+          if (n.id !== nodeId) return n;
+          const frames = n.data.frames || [];
+          // Backfill frameId on legacy segments (preserve current grouping) so anchoring is
+          // consistent. Do NOT re-derive narrationSegment — frame text is independent of voice.
+          let existing = n.data.voiceSegments || [];
+          if (frames.length > 0 && existing.some((s) => !s.frameId)) existing = assignSegmentFrames(frames, existing);
+          let segs = [...existing, segment];
+          // Keep playback order aligned with frame order — appending to the end would make a
+          // segment added to an earlier frame play after later frames (playback is array-ordered).
+          if (frames.length > 1) {
+            const order = new Map(frames.map((f, i) => [f.id, i]));
+            segs = segs
+              .map((s, i) => ({ s, i }))
+              .sort((a, b) =>
+                ((order.get(a.s.frameId as string) ?? frames.length) - (order.get(b.s.frameId as string) ?? frames.length)) ||
+                (a.i - b.i),
+              )
+              .map((x) => x.s);
+          }
+          return { ...n, data: { ...n.data, voiceSegments: segs } };
+        }),
         updatedAt: new Date().toISOString(),
       },
       ...hist,
@@ -439,11 +472,16 @@ export const useStoryStore = create<StoryState>()(persist((set, get) => ({
     set({
       story: {
         ...story,
-        nodes: (story.nodes || []).map((n) =>
-          n.id === nodeId
-            ? { ...n, data: { ...n.data, voiceSegments: (n.data.voiceSegments || []).filter((_, i) => i !== segIndex) } }
-            : n
-        ),
+        nodes: (story.nodes || []).map((n) => {
+          if (n.id !== nodeId) return n;
+          const frames = n.data.frames || [];
+          // Anchor legacy segments first (frameId) so deleting one doesn't re-proportion the rest.
+          // narrationSegment is left untouched — deleting voice must not erase the frame's text.
+          let segs = n.data.voiceSegments || [];
+          if (frames.length > 0 && segs.some((s) => !s.frameId)) segs = assignSegmentFrames(frames, segs);
+          segs = segs.filter((_, i) => i !== segIndex);
+          return { ...n, data: { ...n.data, voiceSegments: segs } };
+        }),
         updatedAt: new Date().toISOString(),
       },
       ...hist,

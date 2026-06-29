@@ -4,6 +4,8 @@
 const KELING_BASE_URL = process.env.KELING_BASE_URL || 'https://api-beijing.klingai.com';
 const KLING_ACCESS_KEY = process.env.KLING_ACCESS_KEY || '';
 const KLING_SECRET_KEY = process.env.KLING_SECRET_KEY || '';
+// 生图模型，env 可配（默认可灵 Omni）。换模型只改 env，不动代码。
+export const KLING_IMAGE_MODEL = process.env.KLING_IMAGE_MODEL || 'kling-image-o1';
 
 // --- JWT Generation (HMAC-SHA256) ---
 
@@ -66,14 +68,17 @@ interface KelingResultResponse {
 export async function submitImageGeneration(params: KelingGenerateRequest): Promise<string> {
   const token = generateJWT();
 
-  const isOmni = !params.model_name || params.model_name === 'kling-image-o1';
+  // Resolve effective model, then derive endpoint from it.
+  // omni-image endpoint is specific to the o1 omni model; everything else uses generations.
+  const effectiveModel = params.model_name || KLING_IMAGE_MODEL;
+  const isOmni = effectiveModel === 'kling-image-o1';
   const endpoint = isOmni ? '/v1/images/omni-image' : '/v1/images/generations';
 
   const body: Record<string, any> = {
-    model_name: params.model_name || 'kling-image-o1',
+    model_name: effectiveModel,
     prompt: params.prompt,
     n: 1,
-    aspect_ratio: params.aspect_ratio || '16:9',
+    aspect_ratio: params.aspect_ratio || '9:16',
   };
 
   // Only omni-image endpoint supports image_fidelity

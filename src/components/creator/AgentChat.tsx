@@ -11,6 +11,7 @@ import type { StoryNode, StoryEdge, StoryOutline } from '@/types/story';
 import { v4 as uuid } from 'uuid';
 import { useReactLoop } from '@/hooks/useReactLoop';
 import { layoutNodes } from '@/lib/layout';
+import { reconcileVoiceTypes } from '@/lib/entity-utils';
 
 const skillLabels: Record<SkillName, string> = {
   styleConfirm: '画面风格',
@@ -147,6 +148,41 @@ export default function AgentChat() {
 
   // LangGraph agent
   const reactLoop = useReactLoop();
+
+  // ── A. 生成过程中拦截刷新/关页 ──
+  // agent 的推理历史与循环只在内存，刷新会中断且无法自动续跑，故运行中提示确认。
+  useEffect(() => {
+    const isRunning = reactLoop.status === 'thinking' || reactLoop.status === 'acting';
+    if (!isRunning) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = ''; // 触发浏览器原生「确认离开」弹窗
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [reactLoop.status]);
+
+  // ── C. 挂载时恢复被中断的会话 ──
+  // 刷新后内存循环已丢失：清掉可能残留的运行标志，并在检测到「有进度但已停」时提示用户可输入"继续"。
+  const interruptHintShownRef = useRef(false);
+  useEffect(() => {
+    if (interruptHintShownRef.current) return;
+    interruptHintShownRef.current = true;
+    // 防御性复位（这些标志不持久化，但同会话异常退出可能残留）
+    useChatStore.getState().setStreaming(false);
+    useChatStore.getState().setReactLoopActive(false);
+
+    const { messages: msgs } = useChatStore.getState();
+    if (msgs.length === 0) return;
+    const last = msgs[msgs.length - 1];
+    const INTERRUPT_HINT = '⚠️ 检测到上次生成可能被中断（如刷新页面）。已保存的进度仍在，输入「继续」即可从当前进度恢复。';
+    // 仅当最后一条不是在等待用户、也不是本提示本身时，才提示（避免误报与重复）
+    const looksWaiting = last.role === 'assistant'
+      && /继续|下一步|请输入|你想|要做什么|\?|？/.test(last.content || '');
+    if (last.role === 'assistant' && last.content !== INTERRUPT_HINT && !looksWaiting) {
+      useChatStore.getState().addMessage({ role: 'assistant', content: INTERRUPT_HINT });
+    }
+  }, []);
 
   // Smart scroll: when user sends a message, scroll to bottom to show it.
   // When agent starts replying, scroll once to show the reply top, then stop.
@@ -1042,13 +1078,13 @@ export default function AgentChat() {
     const tasks: { type: 'characters' | 'scenes' | 'props'; id: string; name: string; prompt: string; aspectRatio: string }[] = [];
 
     for (const c of (entities.characters || [])) {
-      if (c.imagePrompt) tasks.push({ type: 'characters', id: c.id, name: c.name || '角色', prompt: `${stylePrefix}${c.imagePrompt}`, aspectRatio: '3:4' });
+      if (c.imagePrompt) tasks.push({ type: 'characters', id: c.id, name: c.name || '角色', prompt: `${stylePrefix}${c.imagePrompt}`, aspectRatio: '9:16' });
     }
     for (const s of (entities.scenes || [])) {
-      if (s.imagePrompt) tasks.push({ type: 'scenes', id: s.id, name: s.name || '场景', prompt: `${stylePrefix}${s.imagePrompt}`, aspectRatio: '16:9' });
+      if (s.imagePrompt) tasks.push({ type: 'scenes', id: s.id, name: s.name || '场景', prompt: `${stylePrefix}${s.imagePrompt}`, aspectRatio: '9:16' });
     }
     for (const p of (entities.props || [])) {
-      if (p.imagePrompt) tasks.push({ type: 'props', id: p.id, name: p.name || '道具', prompt: `${stylePrefix}${p.imagePrompt}`, aspectRatio: '1:1' });
+      if (p.imagePrompt) tasks.push({ type: 'props', id: p.id, name: p.name || '道具', prompt: `${stylePrefix}${p.imagePrompt}`, aspectRatio: '9:16' });
     }
 
     if (tasks.length === 0) return;
@@ -1084,6 +1120,7 @@ export default function AgentChat() {
             if (pollData.status === 'completed' && pollData.imageUrl) {
               return { ...task, imageUrl: pollData.imageUrl };
             }
+            if (pollData.status === 'moderated') throw new Error('画面描述被内容审核拦截');
             if (pollData.status === 'failed') throw new Error('Generation failed');
           }
           throw new Error('Timeout');
@@ -1224,7 +1261,7 @@ export default function AgentChat() {
             const nodeId = batch[j].id;
             const { updateNode } = useStoryStore.getState();
             updateNode(nodeId, {
-              voiceSegments: voice.segments || voice.voiceSegments || [],
+              voiceSegments: reconcileVoiceTypes(voice.segments || voice.voiceSegments || [], entities),
             });
             successCount++;
           }
@@ -1478,17 +1515,31 @@ export default function AgentChat() {
     setStreaming(true);
     try {
       const story = useStoryStore.getState().story;
-      const storyContext = story ? [
-        `故事标题: ${story.title}`,
-        `节点数: ${(story.nodes || []).length}`,
-        `结局数: ${(story.nodes || []).filter((n) => n.type === 'ending').length}`,
-        `连线数: ${(story.edges || []).length}`,
-        orchestrator.style ? `风格: ${orchestrator.style.styleName}` : '',
-        orchestrator.outline ? `主题: ${orchestrator.outline.theme}` : '',
-        orchestrator.entities ? `角色: ${orchestrator.entities.characters.map((c: any) => c.name).join('、')}` : '',
-        `当前步骤: ${orchestrator.currentSkill ? skillLabels[orchestrator.currentSkill] : '全部完成'}`,
-        (story.nodes || []).length > 0 ? `节点列表:\n${(story.nodes || []).map((n, i) => `${i + 1}. [${n.type}] ${n.data.title}`).join('\n')}` : '',
-      ].filter(Boolean).join('\n') : '暂无故事数据';
+      const storyContext = story ? (() => {
+        const ctx = [
+          `故事标题: ${story.title}`,
+          story.worldView ? `世界观: ${story.worldView}` : '',
+          orchestrator.outline ? `主题: ${orchestrator.outline.theme}` : '',
+          orchestrator.style ? `风格: ${orchestrator.style.styleName}` : '',
+          `节点数: ${(story.nodes || []).length}，结局数: ${(story.nodes || []).filter((n) => n.type === 'ending').length}，连线数: ${(story.edges || []).length}`,
+          `当前步骤: ${orchestrator.currentSkill ? skillLabels[orchestrator.currentSkill] : '全部完成'}`,
+          orchestrator.entities && orchestrator.entities.characters.length > 0
+            ? `角色:\n${orchestrator.entities.characters.map((c: any) => `- ${c.name}${c.personality ? `（${c.personality}）` : ''}: ${c.description || ''}`).join('\n')}`
+            : '',
+          (story.nodes || []).length > 0
+            ? `节点内容:\n${(story.nodes || []).map((n, i) => {
+                const parts = [`${i + 1}. [${n.type}] ${n.data.title}`];
+                if (n.data.narration) parts.push(`   旁白: ${n.data.narration}`);
+                if (n.data.dialogue) parts.push(`   对话: ${n.data.dialogue}`);
+                return parts.join('\n');
+              }).join('\n')}`
+            : '',
+        ].filter(Boolean).join('\n');
+        // GLM-5.2 的上下文窗口是 1M tokens，普通故事远低于此；这里只设一个宽松的安全上限，
+        // 防止极大故事（几百节点）意外撑爆。约 120k 字符 ≈ 数万 token，仍远小于 1M。
+        const MAX_CTX_CHARS = 120000;
+        return ctx.length > MAX_CTX_CHARS ? ctx.slice(0, MAX_CTX_CHARS) + '\n…（故事过长，已截断）' : ctx;
+      })() : '暂无故事数据';
 
       const res = await fetch('/api/generate-story', {
         method: 'POST',
@@ -1511,31 +1562,6 @@ export default function AgentChat() {
     }
   }, [addMessage, setStreaming, orchestrator]);
 
-  const classifyIntent = useCallback(async (text: string): Promise<IntentResult> => {
-    try {
-      const story = useStoryStore.getState().story;
-      const completedSkills = orchestrator.skills
-        .filter((s) => s.status === 'completed')
-        .map((s) => s.name);
-
-      const res = await fetch('/api/classify-intent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userMessage: text,
-          currentSkill: orchestrator.currentSkill,
-          completedSkills,
-          hasStory: !!(story && (story.nodes || []).length > 0),
-          nodeCount: story?.nodes?.length || 0,
-        }),
-      });
-      const data = await res.json();
-      return { intent: data.intent || 'general_chat', params: data.params || {} };
-    } catch {
-      return { intent: 'general_chat', params: {} };
-    }
-  }, [orchestrator]);
-
   // Helper: start story creation flow
   const startStoryCreation = useCallback((description: string, clearChat = false, userText?: string, depth?: number) => {
     if (clearChat) {
@@ -1547,7 +1573,9 @@ export default function AgentChat() {
     }
     requestedDepthRef.current = depth;
     setStoryDescription(description);
-    initStory('新影游', description);
+    // Preserve the backend-assigned name (未命名项目(N)); only fall back to a placeholder
+    const existingTitle = useStoryStore.getState().story?.title;
+    initStory(existingTitle && existingTitle !== '新影游' ? existingTitle : '未命名项目', description);
     setStreaming(true);
     setCurrentSkill('styleConfirm');
     updateSkillStatus('styleConfirm', 'running');

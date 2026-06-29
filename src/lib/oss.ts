@@ -18,6 +18,7 @@ function getClient(): OSS {
       bucket,
       region: process.env.OSS_REGION || 'oss-cn-beijing',
       endpoint: process.env.OSS_ENDPOINT || 'oss-cn-beijing.aliyuncs.com',
+      secure: true, // return https:// URLs — http URLs are blocked as mixed content on https pages (black screen)
     });
   }
   return client;
@@ -47,7 +48,7 @@ export async function uploadFile(buffer: Buffer, filename: string, contentType: 
       });
       const bucket = process.env.OSS_BUCKET || 'odosai';
       const endpoint = process.env.OSS_ENDPOINT || 'oss-cn-beijing.aliyuncs.com';
-      return `http://${bucket}.${endpoint}/${filename}`;
+      return `https://${bucket}.${endpoint}/${filename}`;
     } finally {
       try { fs.unlinkSync(tmpPath); } catch {}
     }

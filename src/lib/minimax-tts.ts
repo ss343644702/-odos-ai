@@ -7,7 +7,7 @@ const VOICE_MAP: Record<VoiceType, string> = {
   young_male: 'Chinese (Mandarin)_Gentle_Youth',
   mature_male: 'Chinese (Mandarin)_Reliable_Executive',
   young_female: 'Chinese (Mandarin)_Warm_Girl',
-  mature_female: 'Chinese (Mandarin)_Mature_Woman',
+  mature_female: 'Chinese (Mandarin)_Wise_Women',
   elder: 'Chinese (Mandarin)_Humorous_Elder',
   child: 'Chinese (Mandarin)_Cute_Spirit',
 };

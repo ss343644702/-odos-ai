@@ -4,7 +4,7 @@ export default function Home() {
   return (
     <div className="min-h-screen flex flex-col items-center justify-center gap-8" style={{ background: 'var(--bg-primary)' }}>
       <h1 className="text-4xl font-bold" style={{ color: 'var(--text-primary)' }}>
-        Odos AI
+        Oii 互动
       </h1>
       <p style={{ color: 'var(--text-secondary)' }}>AI 驱动的互动故事，由你书写</p>
       <div className="flex gap-4">

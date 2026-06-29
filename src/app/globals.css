@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 /* ============================================================
-   Odos AI Design System
+   Oii 互动 Design System
    C端 (默认): Claude 风格 — 温暖羊皮纸、文学沙龙感
    创作端 (.theme-creator): VoltAgent 风格 — 深空暗色、工程精密感
    ============================================================ */
@@ -176,4 +176,22 @@ body.overflow-locked {
 .cursor-blink::after {
   content: '|';
   animation: blink 1s step-end infinite;
+}
+
+/* Immersive subtitle overlay — fade + rise on node/segment change */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.fade-in-up {
+  animation: fadeInUp 0.35s ease-out;
+}
+
+/* Plain fade (no movement) — subtitle reserves its slot, text fills top-down */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.fade-in {
+  animation: fadeIn 0.3s ease-out;
 }

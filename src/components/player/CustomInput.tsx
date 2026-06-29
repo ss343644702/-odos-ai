@@ -2,12 +2,17 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { usePlayerStore } from '@/stores/playerStore';
+import { buildStoryline } from '@/types/story';
 import { v4 as uuid } from 'uuid';
 import ButterflyLoading from './ButterflyLoading';
 
 interface CustomInputProps {
   nodeId: string;
   storyId: string;
+  // When false, the free-input box is hidden but the background prefetch still runs. This lets
+  // nodes that don't allow custom input (e.g. converge bridges) still pre-generate their children,
+  // so clicking 继续 doesn't fall into the slow on-demand path.
+  canInput?: boolean;
 }
 
 /** Check if a node needs prefetch: no narration or no voice segments */
@@ -24,7 +29,7 @@ function isNodeReady(node: any): boolean {
 
 const MAX_RETRIES = 2;
 
-export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
+export default function CustomInput({ nodeId, storyId, canInput = true }: CustomInputProps) {
   const [input, setInput] = useState('');
   const [rejectMessage, setRejectMessage] = useState('');
   const [submittedText, setSubmittedText] = useState('');
@@ -39,7 +44,26 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
   const story = usePlayerStore((s) => s.story);
   const session = usePlayerStore((s) => s.session);
   const isBranching = usePlayerStore((s) => s.isBranching);
-  const prefetchAbortRef = useRef<AbortController | null>(null);
+  // Prefetch can run from two triggers (node-entry effect + post-pipeline). Track every in-flight
+  // controller (so we can abort them all on leave/submit) and the set of node ids currently being
+  // generated (so overlapping triggers don't re-issue — and abort — each other's work).
+  const prefetchControllersRef = useRef<Set<AbortController>>(new Set());
+  const prefetchInFlightRef = useRef<Set<string>>(new Set());
+  const pipelineAbortRef = useRef<AbortController | null>(null);
+
+  const abortAllPrefetch = useCallback(() => {
+    prefetchControllersRef.current.forEach((c) => c.abort());
+    prefetchControllersRef.current.clear();
+    prefetchInFlightRef.current.clear();
+  }, []);
+
+  // Abort any in-flight generation when leaving this node / unmounting (e.g. player hits back)
+  useEffect(() => {
+    return () => {
+      pipelineAbortRef.current?.abort();
+      abortAllPrefetch();
+    };
+  }, [nodeId, abortAllPrefetch]);
 
   /** Background prefetch: generate narration + voice + TTS for stub nodes */
   const runPrefetch = useCallback(async (
@@ -49,27 +73,39 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
   ) => {
     if (nodesToPrefetch.length === 0) return;
 
-    // Deduplicate: skip nodes that already have full content
+    // Deduplicate: skip nodes that already have full content OR are already being prefetched by
+    // another in-flight call. Without the in-flight check, the node-entry and post-pipeline
+    // triggers fire for the same stubs and abort each other mid-request (truncated body → server
+    // errors + wasted work).
     const existing = usePlayerStore.getState().story?.nodes || [];
     const toProcess = nodesToPrefetch.filter((n: any) => {
+      if (prefetchInFlightRef.current.has(n.id)) return false;
       const existingNode = existing.find((en) => en.id === n.id);
       return !existingNode || needsPrefetch(existingNode);
     });
     if (toProcess.length === 0) return;
 
-    // Cancel any previous in-flight prefetch
-    prefetchAbortRef.current?.abort();
+    // Each prefetch gets its OWN controller (no longer aborts sibling prefetches) and registers
+    // its node ids so overlapping triggers skip them above.
     const abortController = new AbortController();
-    prefetchAbortRef.current = abortController;
+    prefetchControllersRef.current.add(abortController);
+    const inFlightIds: string[] = toProcess.map((n: any) => n.id);
+    inFlightIds.forEach((id) => prefetchInFlightRef.current.add(id));
 
     const buildBody = () => ({
       storyId,
       nodes: toProcess,
+      // Linear story-so-far (start → current node) from history only — excludes abandoned branches.
+      storyline: buildStoryline(
+        usePlayerStore.getState().story?.nodes || [],
+        usePlayerStore.getState().session?.history || [],
+        nodeId,
+      ),
       worldView: story?.worldView || '',
       playerObjective: story?.playerObjective || null,
       mainPlotNodeIds: story?.nodes?.filter((n) => n.type !== 'ai_generated' && n.type !== 'story_config').map((n) => n.id) || [],
       mainPlotNodes: story?.nodes?.filter((n) => n.type !== 'ai_generated' && n.type !== 'story_config').map((n) => ({
-        id: n.id, type: n.type, title: n.data.title, narration: n.data.narration?.slice(0, 200),
+        id: n.id, type: n.type, title: n.data.title, narration: n.data.narration,
         choices: n.data.choices?.map((c) => ({ id: c.id, text: c.text, targetNodeId: c.targetNodeId })),
       })) || [],
       style: story?.style || null,
@@ -79,47 +115,52 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
       convergenceTarget,
       convergenceTargetContext: (() => {
         const ctNode = story?.nodes?.find((n) => n.id === convergenceTarget);
-        return ctNode ? { title: ctNode.data.title, narration: ctNode.data.narration?.slice(0, 150) } : null;
+        return ctNode ? { title: ctNode.data.title, narration: ctNode.data.narration } : null;
       })(),
     });
 
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      if (abortController.signal.aborted) return;
-      try {
-        const res = await fetch('/api/branch-prefetch', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(buildBody()),
-          signal: abortController.signal,
-        });
-        if (!res.ok) {
-          if (attempt < MAX_RETRIES) continue;
-          return;
-        }
-        const data = await res.json();
-
+    try {
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
         if (abortController.signal.aborted) return;
-
-        for (const completed of (data.completedNodes || [])) {
-          updateGeneratedNode(completed.nodeId, completed.data);
-        }
-
-        const newExtras = data.newExtraNodes || [];
-        if (newExtras.length > 0) {
-          const currentNodes = usePlayerStore.getState().story?.nodes || [];
-          const fresh = newExtras.filter((n: any) => !currentNodes.some((en) => en.id === n.id));
-          if (fresh.length > 0) addGeneratedNodes(fresh);
-          // Only prefetch 1 level deep (immediate next choices), not recursive
-          const incomplete = fresh.filter((n: any) => needsPrefetch(n));
-          if (incomplete.length > 0 && branchDepth < 1) {
-            runPrefetch(incomplete, branchDepth + 1, convergenceTarget);
+        try {
+          const res = await fetch('/api/branch-prefetch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(buildBody()),
+            signal: abortController.signal,
+          });
+          if (!res.ok) {
+            if (attempt < MAX_RETRIES) continue;
+            return;
           }
+          const data = await res.json();
+
+          if (abortController.signal.aborted) return;
+
+          for (const completed of (data.completedNodes || [])) {
+            updateGeneratedNode(completed.nodeId, completed.data);
+          }
+
+          const newExtras = data.newExtraNodes || [];
+          if (newExtras.length > 0) {
+            const currentNodes = usePlayerStore.getState().story?.nodes || [];
+            const fresh = newExtras.filter((n: any) => !currentNodes.some((en) => en.id === n.id));
+            if (fresh.length > 0) addGeneratedNodes(fresh);
+            // Only prefetch 1 level deep (immediate next choices), not recursive
+            const incomplete = fresh.filter((n: any) => needsPrefetch(n));
+            if (incomplete.length > 0 && branchDepth < 1) {
+              runPrefetch(incomplete, branchDepth + 1, convergenceTarget);
+            }
+          }
+          return; // Success
+        } catch (err: any) {
+          if (err?.name === 'AbortError') return;
+          if (attempt >= MAX_RETRIES) return;
         }
-        return; // Success
-      } catch (err: any) {
-        if (err?.name === 'AbortError') return;
-        if (attempt >= MAX_RETRIES) return;
       }
+    } finally {
+      prefetchControllersRef.current.delete(abortController);
+      inFlightIds.forEach((id) => prefetchInFlightRef.current.delete(id));
     }
   }, [storyId, story, updateGeneratedNode, addGeneratedNodes]);
 
@@ -155,7 +196,7 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
   }, [nodeId, runPrefetch]);
 
   /** Call pipeline with retry */
-  const callPipeline = useCallback(async (text: string) => {
+  const callPipeline = useCallback(async (text: string, signal?: AbortSignal) => {
     const buildBody = () => {
       const allNodes = story?.nodes || [];
       const mainNodes = allNodes.filter((n) => n.type !== 'ai_generated' && n.type !== 'story_config');
@@ -163,7 +204,7 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
       // Build rich main plot nodes with choice text + connection info
       const mainPlotNodes = mainNodes.map((n) => ({
         id: n.id, type: n.type, title: n.data.title,
-        narration: n.data.narration?.slice(0, 150),
+        narration: n.data.narration,
         choices: n.data.choices?.map((c) => ({
           id: c.id,
           text: c.text,
@@ -174,14 +215,14 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
       // Build recent AI narration chain: narration from AI-generated nodes in history
       const hist = session?.history || [];
       const recentAiNarrations = hist
-        .slice(-6)
+        .slice(-20)
         .map((step) => {
           const node = allNodes.find((n) => n.id === step.nodeId);
           if (!node) return null;
           return {
             nodeId: node.id,
             title: node.data.title,
-            narration: node.data.narration?.slice(0, 150),
+            narration: node.data.narration,
             wasCustomInput: !!step.customInput,
             customInput: step.customInput || undefined,
             isAiGenerated: node.type === 'ai_generated',
@@ -192,7 +233,16 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
       // Collect ending nodes for route_to_ending
       const endingNodes = allNodes
         .filter((n) => n.type === 'ending')
-        .map((n) => ({ id: n.id, title: n.data.title, narration: n.data.narration?.slice(0, 200) }));
+        .map((n) => ({ id: n.id, title: n.data.title, narration: n.data.narration }));
+
+      // Intent constraint: when enabled, restrict navigate_existing matching to the allowed
+      // choices only (Fix B), and send their texts for the reject gate.
+      const curNode = allNodes.find((n) => n.id === nodeId);
+      const allowedChoiceIds = (curNode?.data.constrainIntents && curNode.data.constrainIntentChoiceIds?.length)
+        ? new Set(curNode.data.constrainIntentChoiceIds)
+        : null;
+      const allChoices = curNode?.data.choices || [];
+      const visibleChoices = allowedChoiceIds ? allChoices.filter((c: any) => allowedChoiceIds.has(c.id)) : allChoices;
 
       return {
         storyId,
@@ -200,25 +250,21 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
         playerInput: text,
         history: hist,
         recentAiNarrations,
+        // Linear story-so-far (start → current node), built strictly from history so it excludes
+        // abandoned branch attempts (goBack pops them). Lets the LLM reason with the real plot line.
+        storyline: buildStoryline(allNodes, hist, nodeId),
         worldView: story?.worldView || '',
         playerObjective: story?.playerObjective || null,
         mainPlotNodeIds: mainNodes.map((n) => n.id),
         mainPlotNodes,
         endingNodes,
-        existingChoices: allNodes.find((n) => n.id === nodeId)?.data.choices || [],
+        existingChoices: visibleChoices,
         currentNodeContext: (() => {
           const node = allNodes.find((n) => n.id === nodeId);
           return node ? { title: node.data.title, narration: node.data.narration, dialogue: node.data.dialogue, character: node.data.character } : null;
         })(),
-        // Intent constraint: if enabled, send allowed choice texts for LLM validation
-        constrainIntents: (() => {
-          const node = allNodes.find((n) => n.id === nodeId);
-          if (!node?.data.constrainIntents || !node.data.constrainIntentChoiceIds?.length) return null;
-          const allowedIds = new Set(node.data.constrainIntentChoiceIds);
-          return (node.data.choices || [])
-            .filter((c: any) => allowedIds.has(c.id))
-            .map((c: any) => c.text);
-        })(),
+        // Allowed choice texts for the reject gate (null = unconstrained)
+        constrainIntents: allowedChoiceIds ? visibleChoices.map((c: any) => c.text) : null,
         style: story?.style || null,
         entities: story?.entities || null,
         defaultVoice: story?.settings?.defaultVoice || 'narrator',
@@ -231,13 +277,15 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(buildBody()),
+          signal,
         });
         const result = await response.json();
         if (response.ok && result.action) return result;
         // Retry on server error
         if (attempt < MAX_RETRIES) continue;
         return null;
-      } catch {
+      } catch (err: any) {
+        if (err?.name === 'AbortError') return null; // user cancelled — stop, no retry
         if (attempt >= MAX_RETRIES) return null;
       }
     }
@@ -251,26 +299,34 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
     setInput('');
     setSubmittedText(text);
     // Cancel any in-flight prefetch before starting new pipeline
-    prefetchAbortRef.current?.abort();
-    // Show loading IMMEDIATELY
+    abortAllPrefetch();
+    // Show loading IMMEDIATELY (history is recorded only on success — see below)
     setBranching(true);
-    submitCustomInput(text);
 
-    // Check local cache
-    const cached = findMatchingBranch(nodeId, text);
+    // Intent-constrained nodes must route deterministically via the decision (navigate_existing),
+    // NOT via the fuzzy/semantic branch cache — a fuzzy cache hit can jump to the wrong node. (Fix A)
+    const curNode = (story?.nodes || []).find((n) => n.id === nodeId);
+    const intentConstrained = !!(curNode?.data.constrainIntents && curNode.data.constrainIntentChoiceIds?.length);
+
+    // Check local cache (skipped for intent-constrained nodes)
+    const cached = intentConstrained ? null : findMatchingBranch(nodeId, text);
     if (cached) {
       const existingNodes = story?.nodes || [];
       const newNodes = cached.generatedNodes.filter(
         (n) => !existingNodes.some((en) => en.id === n.id)
       );
       if (newNodes.length > 0) addGeneratedNodes(newNodes);
-      setCurrentNode(cached.generatedNodes[0]);
+      // Prefer the fresh node from the store (cached copy may be stale after prefetch)
+      const headId = cached.generatedNodes[0]?.id;
+      const fresh = usePlayerStore.getState().story?.nodes?.find((n) => n.id === headId);
+      submitCustomInput(text);
+      setCurrentNode(fresh || cached.generatedNodes[0]);
       setBranching(false);
       return;
     }
 
-    // Check server cache
-    try {
+    // Check server cache (skipped for intent-constrained nodes)
+    if (!intentConstrained) try {
       const cacheRes = await fetch(`/api/branches?storyId=${encodeURIComponent(storyId)}&parentNodeId=${encodeURIComponent(nodeId)}&input=${encodeURIComponent(text)}`);
       const cacheData = await cacheRes.json();
       if (cacheData.branch) {
@@ -280,22 +336,32 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
           (n: any) => !existingNodes.some((en) => en.id === n.id)
         );
         if (newNodes.length > 0) addGeneratedNodes(newNodes);
-        if (serverNodes.length > 0) setCurrentNode(serverNodes[0]);
         addGeneratedBranch({
           id: cacheData.branch.id, storyId, parentNodeId: nodeId, playerInput: text,
           generatedNodes: serverNodes, generatedEdges: cacheData.branch.generatedEdges || [],
           usageCount: cacheData.branch.usageCount || 1, createdAt: cacheData.branch.createdAt,
         });
+        if (serverNodes.length > 0) {
+          submitCustomInput(text);
+          setCurrentNode(serverNodes[0]);
+        }
         setBranching(false);
         return;
       }
     } catch { /* continue */ }
 
-    // Full pipeline with retry
-    const result = await callPipeline(text);
+    // Full pipeline with retry (abortable)
+    const controller = new AbortController();
+    pipelineAbortRef.current = controller;
+    const result = await callPipeline(text, controller.signal);
+    pipelineAbortRef.current = null;
+
+    // User cancelled mid-flight — UI already reset by the cancel handler
+    if (controller.signal.aborted) return;
 
     if (!result) {
       setBranching(false);
+      setInput(text); // restore so the player doesn't lose what they typed
       setRejectMessage('生成失败，请重试');
       setTimeout(() => setRejectMessage(''), 5000);
       return;
@@ -303,6 +369,7 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
 
     if (result.action === 'reject') {
       setBranching(false);
+      setInput(text); // restore the rejected input for editing
       setRejectMessage(result.message || '大白天想什么呢，重新选择一下吧');
       setTimeout(() => setRejectMessage(''), 5000);
       return;
@@ -315,7 +382,18 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
       const matchedChoice = currentNodeData?.data.choices?.find((c: any) => c.targetNodeId === result.targetNodeId);
       const isHidden = matchedChoice?.visibility === 'hidden';
 
+      // navigateToNode records exactly one history step (do NOT also call submitCustomInput)
       navigateToNode(result.targetNodeId, text);
+
+      // Cache the input→existing-node mapping so identical input skips the decision LLM next time
+      const targetNode = allNodes.find((n) => n.id === result.targetNodeId);
+      if (targetNode) {
+        addGeneratedBranch({
+          id: uuid(), storyId, parentNodeId: nodeId, playerInput: text,
+          generatedNodes: [targetNode], generatedEdges: [],
+          usageCount: 1, createdAt: new Date().toISOString(),
+        });
+      }
 
       // Record hidden trigger for future achievement system
       if (isHidden) {
@@ -338,11 +416,14 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
       if (!isNodeReady(mainNode)) {
         // Main node incomplete — should not happen, but handle gracefully
         setBranching(false);
-        alert('生成失败，请重试');
+        setInput(text);
+        setRejectMessage('生成失败，请重试');
+        setTimeout(() => setRejectMessage(''), 5000);
         return;
       }
 
       addGeneratedNodes(result.newNodes);
+      submitCustomInput(text); // record history before switching node (reads currentNode)
       setCurrentNode(mainNode);
 
       // Cache
@@ -376,7 +457,7 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
       );
       if (incompleteNodes.length > 0) {
         const ct = result.convergenceTarget ||
-          (story?.nodes?.filter((n) => n.type !== 'ai_generated').map((n) => n.id) || [])[0];
+          (story?.nodes?.filter((n) => n.type !== 'ai_generated' && n.type !== 'story_config').map((n) => n.id) || [])[0];
         runPrefetch(incompleteNodes, 1, ct);
       }
 
@@ -387,6 +468,19 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
     setBranching(false);
   }, [input, isBranching, nodeId, storyId, story, session, submitCustomInput, setBranching, setCurrentNode, addGeneratedNodes, addGeneratedBranch, findMatchingBranch, runPrefetch, callPipeline]);
 
+  /** Cancel an in-flight generation and restore the typed text */
+  const handleCancel = useCallback(() => {
+    pipelineAbortRef.current?.abort();
+    pipelineAbortRef.current = null;
+    abortAllPrefetch();
+    setBranching(false);
+    if (submittedText) setInput(submittedText);
+  }, [setBranching, submittedText]);
+
+  // Input box is hidden when custom input isn't allowed — but all hooks above (incl. the prefetch
+  // effect) have already run, so this node's children still get pre-generated.
+  if (!canInput) return null;
+
   return (
     <div className="mt-3">
       <div
@@ -394,7 +488,19 @@ export default function CustomInput({ nodeId, storyId }: CustomInputProps) {
         style={{ border: '1px dashed var(--accent)', background: 'var(--bg-tertiary)' }}
       >
         {isBranching ? (
-          <ButterflyLoading prefix={submittedText} />
+          <>
+            <div className="flex-1 min-w-0">
+              <ButterflyLoading prefix={submittedText} />
+            </div>
+            <button
+              onClick={handleCancel}
+              className="px-3 py-3 text-xs font-medium whitespace-nowrap transition-colors"
+              style={{ color: 'var(--text-muted)' }}
+              title="取消生成"
+            >
+              取消
+            </button>
+          </>
         ) : (
           <>
             <input

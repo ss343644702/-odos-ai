@@ -143,7 +143,7 @@ export default function ProfilePage() {
     <div className="min-h-screen pb-24" style={{ background: 'var(--bg-primary)' }} onClick={() => setShowMenu(null)}>
       {/* Top bar */}
       <div className="flex items-center justify-between px-5 pt-4 pb-2">
-        <span className="text-lg font-bold" style={{ color: 'var(--text-primary)' }}>Odos</span>
+        <span className="text-lg font-bold" style={{ color: 'var(--text-primary)' }}>Oii 互动</span>
         <Link href="/settings" className="p-2" style={{ color: 'var(--text-secondary)' }}>
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
             <circle cx="12" cy="12" r="3" />

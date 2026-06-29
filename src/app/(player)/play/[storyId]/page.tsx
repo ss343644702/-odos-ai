@@ -8,18 +8,11 @@ import type { Story } from '@/types/story';
 
 export default function PlayPage() {
   const { storyId } = useParams<{ storyId: string }>();
-  const story = usePlayerStore((s) => s.story);
   const initSession = usePlayerStore((s) => s.initSession);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    // If already loaded with this story, skip fetch
-    if (story?.id === storyId) {
-      setLoading(false);
-      return;
-    }
-
     const loadStory = async () => {
       setLoading(true);
       try {
@@ -47,24 +40,65 @@ export default function PlayPage() {
           entities: (dbStory as any).entities || null,
         };
 
-        // Check for existing session with dynamic nodes to restore progress
+        // Check for existing session: restore progress + dynamic nodes, or create a DB row.
+        let serverSession: any = null;
         try {
           const sessRes = await fetch(`/api/sessions?storyId=${storyId}`);
           if (sessRes.ok) {
             const sessData = await sessRes.json();
-            if (sessData.session?.dynamicNodes?.length > 0) {
+            serverSession = sessData.session || null;
+            if (serverSession?.dynamicNodes?.length > 0) {
               // Merge dynamic nodes into story
-              fullStory.nodes = [...fullStory.nodes, ...sessData.session.dynamicNodes];
-              if (sessData.session.dynamicEdges?.length > 0) {
-                fullStory.edges = [...fullStory.edges, ...sessData.session.dynamicEdges];
+              fullStory.nodes = [...fullStory.nodes, ...serverSession.dynamicNodes];
+              if (serverSession.dynamicEdges?.length > 0) {
+                fullStory.edges = [...fullStory.edges, ...serverSession.dynamicEdges];
               }
             }
           }
         } catch { /* no session to restore */ }
 
-        initSession(fullStory);
+        if (serverSession?.id && serverSession.currentNodeId) {
+          // Mirror server-side achievements / unlocked endings into localStorage (panel source).
+          try {
+            const a = serverSession.achievements;
+            if (a) {
+              const akey = `achievements_${storyId}`;
+              const localA = JSON.parse(localStorage.getItem(akey) || '{}');
+              localStorage.setItem(akey, JSON.stringify({ ...localA, ...a }));
+              if (Array.isArray(a.unlockedEndings) && a.unlockedEndings.length) {
+                const ukey = `unlockedEndings_${storyId}`;
+                const merged = new Set<string>([...(JSON.parse(localStorage.getItem(ukey) || '[]')), ...a.unlockedEndings]);
+                localStorage.setItem(ukey, JSON.stringify([...merged]));
+              }
+            }
+          } catch { /* ignore */ }
+          usePlayerStore.getState().restoreSession(fullStory, serverSession);
+        } else {
+          initSession(fullStory);
+          // Create the DB session row so history/achievement writes actually persist.
+          try {
+            const s = usePlayerStore.getState().session;
+            if (s) {
+              const res = await fetch('/api/sessions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ storyId, currentNodeId: s.currentNodeId, history: s.history }),
+              });
+              if (res.ok) {
+                const { id } = await res.json();
+                if (id) usePlayerStore.getState().setSessionServerId(id);
+              }
+            }
+          } catch { /* offline — localStorage only */ }
+        }
       } catch {
-        setError('找不到这个影游');
+        // Network/offline: fall back to a cached copy if we have one for this story,
+        // otherwise surface the error. (Never trust the cache while online — we must pick
+        // up re-published content + title, which is why we no longer skip the fetch.)
+        const cached = usePlayerStore.getState().story;
+        if (!cached || cached.id !== storyId) {
+          setError('找不到这个影游');
+        }
       }
       setLoading(false);
     };
@@ -74,7 +108,7 @@ export default function PlayPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center" style={{ background: 'var(--bg-primary)', color: 'var(--text-muted)' }}>
+      <div className="h-[100dvh] flex items-center justify-center" style={{ background: 'var(--bg-primary)', color: 'var(--text-muted)' }}>
         加载中...
       </div>
     );
@@ -82,7 +116,7 @@ export default function PlayPage() {
 
   if (error) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center gap-3" style={{ background: 'var(--bg-primary)' }}>
+      <div className="h-[100dvh] flex flex-col items-center justify-center gap-3" style={{ background: 'var(--bg-primary)' }}>
         <div className="text-4xl opacity-30">🎬</div>
         <p className="text-sm" style={{ color: 'var(--text-muted)' }}>{error}</p>
       </div>

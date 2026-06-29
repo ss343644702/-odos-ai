@@ -177,7 +177,14 @@ export const useChatStore = create<ChatState>()(persist((set, get) => ({
 
   setOutline: (outline) =>
     set((s) => ({
-      orchestrator: { ...s.orchestrator, outline },
+      // Fold the legacy 'neutral' ending type into 'normal' (the node enum has no 'neutral';
+      // an unmatched value also makes the type <select> fall back to showing the first option).
+      orchestrator: {
+        ...s.orchestrator,
+        outline: outline?.endings
+          ? { ...outline, endings: outline.endings.map((e: any) => (e?.type === 'neutral' ? { ...e, type: 'normal' } : e)) }
+          : outline,
+      },
     })),
 
   setEntities: (entities) =>

@@ -88,6 +88,11 @@ export default function PublishDialog() {
     setError('');
 
     try {
+      // Sync the editor's in-memory title/description to the published values, so a pending
+      // (or later) autosave can't revert the DB title back to the old draft name.
+      const cur = useStoryStore.getState().story;
+      if (cur) useStoryStore.getState().setStory({ ...cur, title: title.trim(), description: description.trim(), updatedAt: new Date().toISOString() });
+
       const storyData = {
         nodes: story.nodes || [],
         edges: story.edges || [],

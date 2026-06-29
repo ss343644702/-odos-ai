@@ -46,7 +46,7 @@ export default function DiscoverPage() {
       {/* Header */}
       <div className="sticky top-0 z-10 px-4 py-3 flex items-center justify-between" style={{ background: 'rgba(245,244,237,0.9)', backdropFilter: 'blur(12px)' }}>
         <h1 className="text-lg font-bold" style={{ color: 'var(--text-primary)' }}>
-          Odos AI
+          Oii 互动
         </h1>
         <Link
           href="/editor/new"

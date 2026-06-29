@@ -1,14 +1,22 @@
-// LLM API Client - DeepSeek direct API (primary) + MiniMax (fallback)
-// With: tracing, retry with exponential backoff
+// LLM API Client — OpenAI-compatible endpoint (currently GLM-5.2 via Zhipu / 智谱)
+// Provider-agnostic: swap LLM_BASE_URL / LLM_MODEL_* in env to change providers, no code change.
+// NOTE: function names below (callDeepSeek, …) are kept for backwards-compat with 20+ call sites.
 
 import { generateTraceId, estimateTokens, recordTrace } from './trace';
 
-const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || '';
-const DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions';
-const DEEPSEEK_MODEL = 'deepseek-chat';
+const LLM_API_KEY = process.env.LLM_API_KEY || '';
+// Base URL is overridable so the provider/endpoint can change without touching code.
+const LLM_BASE_URL = (process.env.LLM_BASE_URL || 'https://open.bigmodel.cn/api/paas/v4').replace(/\/$/, '');
+const LLM_API_URL = `${LLM_BASE_URL}/chat/completions`;
+const LLM_MODEL_PRO = process.env.LLM_MODEL_PRO || 'glm-5.2';
+const LLM_MODEL_FLASH = process.env.LLM_MODEL_FLASH || 'glm-5.2';
 
-const MINIMAX_API_KEY = process.env.MINIMAX_API_KEY || '';
-const MINIMAX_API_URL = 'https://api.minimaxi.chat/v1/text/chatcompletion_v2';
+// GLM-5.2 is a reasoning model. Thinking is disabled by default (faster, cheaper, content
+// not crowded out by reasoning tokens). Set LLM_THINKING=enabled to turn it back on.
+// The { thinking } field is GLM-specific; harmless extra for other OpenAI-compatible providers
+// only if they ignore unknown fields — clear LLM_THINKING handling if you swap providers.
+const LLM_THINKING_ENABLED = (process.env.LLM_THINKING || 'disabled').toLowerCase() === 'enabled';
+const LLM_EXTRA_BODY: Record<string, unknown> = LLM_THINKING_ENABLED ? {} : { thinking: { type: 'disabled' } };
 
 interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -33,7 +41,7 @@ async function sleep(ms: number): Promise<void> {
 }
 
 // ──────────────────────────────────────────────
-// Core fetch with retry (works for both DeepSeek and MiniMax)
+// Core fetch with retry (OpenAI-compatible: Gemini, and any compatible relay)
 // ──────────────────────────────────────────────
 
 async function fetchWithRetry(
@@ -55,7 +63,7 @@ async function fetchWithRetry(
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${apiKey}`,
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ ...LLM_EXTRA_BODY, ...body }),
       });
 
       if (!response.ok) {
@@ -113,7 +121,7 @@ async function fetchWithRetry(
 }
 
 // ──────────────────────────────────────────────
-// Public API: callLLM — DeepSeek → MiniMax fallback
+// Public API: callLLM — Gemini pro → flash fallback
 // ──────────────────────────────────────────────
 
 export async function callLLM(params: {
@@ -132,9 +140,9 @@ export async function callLLM(params: {
 
   try {
     const { content } = await fetchWithRetry(
-      DEEPSEEK_API_URL, DEEPSEEK_API_KEY,
+      LLM_API_URL, LLM_API_KEY,
       {
-        model: DEEPSEEK_MODEL, messages,
+        model: LLM_MODEL_PRO, messages,
         temperature: params.temperature || 0.7, max_tokens: params.maxTokens || 4096,
         ...(params.responseFormat ? { response_format: params.responseFormat } : {}),
       },
@@ -142,11 +150,15 @@ export async function callLLM(params: {
     );
     return content;
   } catch {
-    if (!MINIMAX_API_KEY) throw new Error('DeepSeek failed and no MiniMax fallback configured');
-    console.log(`[LLM fallback] DeepSeek failed, trying MiniMax | ${traceId}`);
+    if (!LLM_API_KEY) throw new Error('LLM primary failed and no API key configured for fallback');
+    console.log(`[LLM fallback] primary failed, retrying | ${traceId}`);
     const { content } = await fetchWithRetry(
-      MINIMAX_API_URL, MINIMAX_API_KEY,
-      { model: 'MiniMax-Text-01', messages, temperature: params.temperature || 0.7, max_tokens: params.maxTokens || 4096 },
+      LLM_API_URL, LLM_API_KEY,
+      {
+        model: LLM_MODEL_FLASH, messages,
+        temperature: params.temperature || 0.7, max_tokens: params.maxTokens || 4096,
+        ...(params.responseFormat ? { response_format: params.responseFormat } : {}),
+      },
       traceId + '_fallback', params.skill,
     );
     return content;
@@ -170,23 +182,24 @@ export async function callLLMStream(params: {
   const traceId = generateTraceId();
   const start = Date.now();
 
-  const response = await fetch(DEEPSEEK_API_URL, {
+  const response = await fetch(LLM_API_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${DEEPSEEK_API_KEY}` },
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${LLM_API_KEY}` },
     body: JSON.stringify({
-      model: DEEPSEEK_MODEL, messages,
+      ...LLM_EXTRA_BODY,
+      model: LLM_MODEL_PRO, messages,
       temperature: params.temperature || 0.7, max_tokens: params.maxTokens || 4096, stream: true,
-      // Note: DeepSeek streaming does NOT support response_format, omit it
+      // Omit response_format on streaming for broad compatibility
     }),
   });
 
   if (!response.ok || !response.body) {
     recordTrace({
-      traceId, model: DEEPSEEK_MODEL, inputTokensEstimate: estimateTokens(JSON.stringify(messages)),
+      traceId, model: LLM_MODEL_PRO, inputTokensEstimate: estimateTokens(JSON.stringify(messages)),
       outputTokensEstimate: 0, latencyMs: Date.now() - start,
       status: 'error', error: `Stream error: ${response.status}`, timestamp: new Date().toISOString(),
     });
-    throw new Error(`DeepSeek stream error: ${response.status}`);
+    throw new Error(`LLM stream error: ${response.status}`);
   }
 
   const reader = response.body.getReader();
@@ -205,7 +218,7 @@ export async function callLLMStream(params: {
         const data = line.slice(6).trim();
         if (data === '[DONE]') {
           recordTrace({
-            traceId, model: DEEPSEEK_MODEL, inputTokensEstimate: estimateTokens(JSON.stringify(messages)),
+            traceId, model: LLM_MODEL_PRO, inputTokensEstimate: estimateTokens(JSON.stringify(messages)),
             outputTokensEstimate: estimateTokens(fullOutput), latencyMs: Date.now() - start,
             status: 'success', timestamp: new Date().toISOString(),
           });
@@ -222,7 +235,7 @@ export async function callLLMStream(params: {
   }
 
   recordTrace({
-    traceId, model: DEEPSEEK_MODEL, inputTokensEstimate: estimateTokens(JSON.stringify(messages)),
+    traceId, model: LLM_MODEL_PRO, inputTokensEstimate: estimateTokens(JSON.stringify(messages)),
     outputTokensEstimate: estimateTokens(fullOutput), latencyMs: Date.now() - start,
     status: 'success', timestamp: new Date().toISOString(),
   });
@@ -239,8 +252,8 @@ export async function callLLMMultiTurn(params: {
 }): Promise<string> {
   const traceId = generateTraceId();
   const { content } = await fetchWithRetry(
-    DEEPSEEK_API_URL, DEEPSEEK_API_KEY,
-    { model: params.model || DEEPSEEK_MODEL, messages: params.messages, temperature: params.temperature ?? 0.3, max_tokens: params.maxTokens ?? 2048 },
+    LLM_API_URL, LLM_API_KEY,
+    { model: params.model || LLM_MODEL_FLASH, messages: params.messages, temperature: params.temperature ?? 0.3, max_tokens: params.maxTokens ?? 2048 },
     traceId, params.skill || 'multi_turn',
   );
   return content;
@@ -255,8 +268,8 @@ export async function callDeepSeek(params: {
 }): Promise<string> {
   const traceId = generateTraceId();
   const { content } = await fetchWithRetry(
-    DEEPSEEK_API_URL, DEEPSEEK_API_KEY,
-    { model: params.model || DEEPSEEK_MODEL, messages: params.messages, temperature: params.temperature ?? 0.3, max_tokens: params.maxTokens ?? 2048 },
+    LLM_API_URL, LLM_API_KEY,
+    { model: params.model || LLM_MODEL_FLASH, messages: params.messages, temperature: params.temperature ?? 0.3, max_tokens: params.maxTokens ?? 2048 },
     traceId, 'react_agent',
   );
   return content;

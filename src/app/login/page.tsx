@@ -148,7 +148,7 @@ function LoginForm() {
         {/* Branding */}
         <div className="text-center mb-10">
           <h1 className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>
-            Odos AI
+            Oii 互动
           </h1>
           <p className="text-xs mt-2" style={{ color: 'var(--text-secondary)' }}>
             {isRegister ? '创建账号，开始你的互动故事' : '登录后探索和创作互动故事'}

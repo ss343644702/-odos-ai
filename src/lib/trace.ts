@@ -75,3 +75,86 @@ export function getTraceStats(): {
     totalOutputTokens: totalOutput,
   };
 }
+
+// ──────────────────────────────────────────────
+// Pipeline stage timings (branch-pipeline / 自由输入)
+//
+// LLM calls are traced above, but the free-input critical path also spends time in TTS,
+// image generation, OSS upload, and the server-cache lookup — none of which go through
+// callLLM. This records one entry per /api/branch-pipeline request with a breakdown of
+// every stage, so the real latency distribution is visible at /api/debug/traces instead
+// of being inferred from the code's serial structure.
+// ──────────────────────────────────────────────
+
+export interface PipelineStage {
+  name: string;     // 'decision' | 'storyboard' | 'voice' | 'tts' | 'image' | ...
+  ms: number;       // wall-clock duration of this stage
+  status?: 'ok' | 'fallback' | 'skipped' | 'error';
+  detail?: string;  // optional note (e.g. 'timeout', '3 segs')
+}
+
+export interface PipelineTrace {
+  traceId: string;
+  action: string;        // final decision action (reject / converge_to_main / ...)
+  totalMs: number;       // end-to-end server time for the request
+  stages: PipelineStage[];
+  cached?: boolean;      // short-circuited before generation (reject / navigate_existing)
+  timestamp: string;
+}
+
+const PIPELINE_BUFFER_SIZE = 100;
+const pipelineTraces: PipelineTrace[] = [];
+
+/** A tiny stopwatch helper: call .lap(name) to record the time since the previous lap. */
+export function createStopwatch(getNow: () => number) {
+  const t0 = getNow();
+  let last = t0;
+  const stages: PipelineStage[] = [];
+  return {
+    lap(name: string, status?: PipelineStage['status'], detail?: string) {
+      const now = getNow();
+      stages.push({ name, ms: now - last, status, detail });
+      last = now;
+    },
+    stages,
+    totalMs: () => getNow() - t0,
+  };
+}
+
+export function recordPipelineTrace(entry: PipelineTrace): void {
+  pipelineTraces.push(entry);
+  if (pipelineTraces.length > PIPELINE_BUFFER_SIZE) {
+    pipelineTraces.shift();
+  }
+  const breakdown = entry.stages.map((s) => `${s.name}=${s.ms}ms${s.status && s.status !== 'ok' ? `(${s.status})` : ''}`).join(' ');
+  console.log(`[PIPELINE] ${entry.action} | total=${entry.totalMs}ms | ${breakdown} | ${entry.traceId}`);
+}
+
+export function getRecentPipelineTraces(limit = 30): PipelineTrace[] {
+  return pipelineTraces.slice(-limit);
+}
+
+/** Aggregate average per-stage timing across recorded pipeline traces (generation runs only). */
+export function getPipelineStageStats(): {
+  totalRuns: number;
+  avgTotalMs: number;
+  avgByStage: Record<string, { avgMs: number; count: number }>;
+} {
+  const runs = pipelineTraces.filter((t) => !t.cached);
+  if (runs.length === 0) return { totalRuns: 0, avgTotalMs: 0, avgByStage: {} };
+
+  const acc: Record<string, { sum: number; count: number }> = {};
+  for (const t of runs) {
+    for (const s of t.stages) {
+      const a = acc[s.name] || (acc[s.name] = { sum: 0, count: 0 });
+      a.sum += s.ms;
+      a.count += 1;
+    }
+  }
+  const avgByStage: Record<string, { avgMs: number; count: number }> = {};
+  for (const [name, a] of Object.entries(acc)) {
+    avgByStage[name] = { avgMs: Math.round(a.sum / a.count), count: a.count };
+  }
+  const avgTotalMs = Math.round(runs.reduce((s, t) => s + t.totalMs, 0) / runs.length);
+  return { totalRuns: runs.length, avgTotalMs, avgByStage };
+}

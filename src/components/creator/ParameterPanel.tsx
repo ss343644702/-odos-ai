@@ -8,6 +8,7 @@ import StoryConfigPanel from './StoryConfigPanel';
 import { useEditorStore } from '@/stores/editorStore';
 import { v4 as uuid } from 'uuid';
 import type { NodeType, Frame } from '@/types/story';
+import { getSegmentsOfFrame } from '@/types/story';
 import { getEntityImageList } from '@/lib/entity-utils';
 
 const nodeColors: Record<NodeType, string> = {
@@ -23,7 +24,7 @@ const nodeLabels: Record<NodeType, string> = {
   scene: '场景',
   ending: '结局',
   ai_generated: 'AI生成',
-  story_config: '故事配置',
+  story_config: '剧情',
 };
 
 
@@ -101,7 +102,7 @@ export default function ParameterPanel() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         prompt: frame.imagePrompt,
-        aspectRatio: '16:9',
+        aspectRatio: '9:16',
         nodeId: node.id,
         image_list: imageList.length > 0 ? imageList : undefined,
       }),
@@ -125,6 +126,7 @@ export default function ParameterPanel() {
         updateFrame(node.id, frame.id, { imageUrl: pollData.imageUrl });
         return;
       }
+      if (pollData.status === 'moderated') throw new Error('画面描述被内容审核拦截，请调整后重试（避免暴力/血腥/危险等敏感画面）');
       if (pollData.status === 'failed') throw new Error('图片生成失败');
       onProgress?.(`图片生成中... (${attempt + 1}/15)`);
     }
@@ -215,15 +217,10 @@ export default function ParameterPanel() {
     setNewChoiceText('');
   }, [node, newChoiceText, addChoice]);
 
-  // Helper: map voice segments to frames (same logic as syncFramesFromVoice)
+  // Map voice segments to frames — frameId-anchored (falls back to proportional for legacy data)
   const getSegmentsForFrame = useCallback((frameIndex: number): { seg: any; globalIndex: number }[] => {
-    if (!node?.data.voiceSegments || node.data.voiceSegments.length === 0) return [];
-    const segs = node.data.voiceSegments;
-    const fLen = (node.data.frames || []).length;
-    if (fLen === 0) return [];
-    const start = Math.floor(frameIndex * segs.length / fLen);
-    const end = Math.floor((frameIndex + 1) * segs.length / fLen);
-    return segs.slice(start, end).map((seg, j) => ({ seg, globalIndex: start + j }));
+    if (!node) return [];
+    return getSegmentsOfFrame(node.data.frames || [], node.data.voiceSegments || [], frameIndex);
   }, [node]);
 
   // Helper: regenerate a single voice segment
@@ -237,20 +234,25 @@ export default function ParameterPanel() {
     const currentSpeed = edits.speed ?? seg.speed;
 
     setRegeneratingSegId(segId);
+    // Resolve voiceType from the speaker's entity (source of truth) so a mislabeled segment
+    // (e.g. a character segment stored as "narrator") regenerates with the correct voice.
+    const resolvedVoiceType = (seg.speaker && seg.speaker !== 'narrator')
+      ? (entities?.characters?.find((c: any) => c.name === seg.speaker)?.voiceType || seg.voiceType)
+      : seg.voiceType;
     try {
       const updated = [...node.data.voiceSegments];
-      updated[globalIndex] = { ...updated[globalIndex], text: currentText, emotion: currentEmotion, speed: currentSpeed, audioUrl: null };
+      updated[globalIndex] = { ...updated[globalIndex], text: currentText, emotion: currentEmotion, speed: currentSpeed, voiceType: resolvedVoiceType, audioUrl: null };
       updateNode(node.id, { voiceSegments: updated });
 
       const res = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: currentText, voiceType: seg.voiceType, speed: currentSpeed, nodeId: node.id }),
+        body: JSON.stringify({ text: currentText, voiceType: resolvedVoiceType, speed: currentSpeed, nodeId: node.id }),
       });
       const data = await res.json();
       if (data.success && data.audioUrl) {
         const updated2 = [...node.data.voiceSegments];
-        updated2[globalIndex] = { ...updated2[globalIndex], text: currentText, emotion: currentEmotion, speed: currentSpeed, audioUrl: data.audioUrl };
+        updated2[globalIndex] = { ...updated2[globalIndex], text: currentText, emotion: currentEmotion, speed: currentSpeed, voiceType: resolvedVoiceType, audioUrl: data.audioUrl };
         updateNode(node.id, { voiceSegments: updated2 });
       }
       setSegmentEdits((prev) => { const next = { ...prev }; delete next[segId]; return next; });
@@ -259,7 +261,17 @@ export default function ParameterPanel() {
     } finally {
       setRegeneratingSegId(null);
     }
-  }, [node, regeneratingSegId, segmentEdits, updateNode]);
+  }, [node, regeneratingSegId, segmentEdits, updateNode, entities]);
+
+  // Synthetic entity cards (not in story.nodes) → focused config panel
+  const ENTITY_FOCUS: Record<string, 'characters' | 'scenes' | 'props'> = {
+    __entity_characters__: 'characters',
+    __entity_scenes__: 'scenes',
+    __entity_props__: 'props',
+  };
+  if (paramPanelOpen && selectedNodeId && ENTITY_FOCUS[selectedNodeId]) {
+    return <StoryConfigPanel focus={ENTITY_FOCUS[selectedNodeId]} />;
+  }
 
   if (!paramPanelOpen || !node) return null;
 
@@ -361,25 +373,26 @@ export default function ParameterPanel() {
 
             return (
               <div className="rounded-lg overflow-hidden" style={{ border: '1px solid var(--border)' }}>
-                {/* Media area (image / video / GIF) */}
+                {/* Media area (image / video / GIF) — shrunk to 40% width, centered */}
+                <div className="mx-auto" style={{ width: '40%' }}>
                 {(frame.imageUrl || (frame as any).mediaUrl) ? (
                   <div className="relative">
                     {(frame as any).mediaType === 'video' ? (
                       <video
                         src={(frame as any).mediaUrl}
-                        className="w-full aspect-video object-cover"
+                        className="w-full aspect-[9/16] object-cover"
                         controls muted playsInline
                       />
                     ) : (frame as any).mediaType === 'gif' ? (
                       <img
                         src={(frame as any).mediaUrl}
-                        alt="" className="w-full aspect-video object-cover cursor-pointer"
+                        alt="" className="w-full aspect-[9/16] object-cover cursor-pointer"
                         onClick={() => setLightboxImage((frame as any).mediaUrl)}
                       />
                     ) : (
                       <img
                         src={frame.imageUrl!} alt=""
-                        className="w-full aspect-video object-cover cursor-pointer"
+                        className="w-full aspect-[9/16] object-cover cursor-pointer"
                         onClick={() => setLightboxImage(frame.imageUrl)}
                       />
                     )}
@@ -406,7 +419,7 @@ export default function ParameterPanel() {
                   </div>
                 ) : (
                   <div
-                    className="aspect-video flex flex-col items-center justify-center gap-1.5"
+                    className="aspect-[9/16] flex flex-col items-center justify-center gap-1.5"
                     style={{ background: 'var(--bg-tertiary)' }}
                   >
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" strokeWidth="1.5">
@@ -434,6 +447,7 @@ export default function ParameterPanel() {
                     </div>
                   </div>
                 )}
+                </div>
 
                 {/* Frame details */}
                 <div className="p-2.5 space-y-2" style={{ background: 'var(--bg-secondary)' }}>
@@ -518,7 +532,7 @@ export default function ParameterPanel() {
                         配音 ({frameSegs.length} 段)
                       </span>
                       <button
-                        onClick={() => addVoiceSegment(node.id, { id: uuid(), text: '', speaker: 'narrator', voiceType: 'narrator', emotion: 'neutral', speed: 1.0, audioUrl: null })}
+                        onClick={() => addVoiceSegment(node.id, { id: uuid(), text: '', speaker: 'narrator', voiceType: 'narrator', emotion: 'neutral', speed: 1.0, audioUrl: null, frameId: frame.id })}
                         className="text-[9px] px-1.5 py-0.5 rounded"
                         style={{ color: 'var(--accent)', background: 'var(--accent-dim)' }}
                       >+ 添加</button>
@@ -548,8 +562,12 @@ export default function ParameterPanel() {
                                 <select
                                   value={seg.speaker}
                                   onChange={(e) => {
+                                    const speaker = e.target.value;
                                     const updated = [...(node.data.voiceSegments || [])];
-                                    updated[globalIndex] = { ...updated[globalIndex], speaker: e.target.value };
+                                    const vt = speaker === 'narrator'
+                                      ? 'narrator'
+                                      : (entities?.characters?.find((c: any) => c.name === speaker)?.voiceType || updated[globalIndex].voiceType);
+                                    updated[globalIndex] = { ...updated[globalIndex], speaker, voiceType: vt };
                                     updateNode(node.id, { voiceSegments: updated });
                                   }}
                                   className="text-[9px] font-medium px-1.5 py-px rounded"
@@ -664,8 +682,12 @@ export default function ParameterPanel() {
                       <select
                         value={seg.speaker}
                         onChange={(e) => {
+                          const speaker = e.target.value;
                           const updated = [...(node.data.voiceSegments || [])];
-                          updated[i] = { ...updated[i], speaker: e.target.value };
+                          const vt = speaker === 'narrator'
+                            ? 'narrator'
+                            : (entities?.characters?.find((c: any) => c.name === speaker)?.voiceType || updated[i].voiceType);
+                          updated[i] = { ...updated[i], speaker, voiceType: vt };
                           updateNode(node.id, { voiceSegments: updated });
                         }}
                         className="text-[9px] font-medium px-1.5 py-px rounded"

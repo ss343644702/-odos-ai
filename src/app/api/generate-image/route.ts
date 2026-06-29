@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { submitImageGeneration, queryImageResult } from '@/lib/keling';
+import { submitImageGeneration, queryImageResult } from '@/lib/flux';
 import { persistImageUrl } from '@/lib/oss';
 
 export async function POST(request: NextRequest) {
@@ -12,7 +12,7 @@ export async function POST(request: NextRequest) {
   try {
     const taskId = await submitImageGeneration({
       prompt,
-      aspect_ratio: aspectRatio || '16:9',
+      aspect_ratio: aspectRatio || '9:16',
       image_fidelity: imageFidelity || 'normal',
       image_list: image_list || undefined,
     });

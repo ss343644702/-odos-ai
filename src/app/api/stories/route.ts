@@ -47,10 +47,27 @@ export async function POST(request: NextRequest) {
 
   const body = await request.json();
 
+  // Auto-generate an incrementing "未命名项目(N)" when no explicit title is given
+  // (treat the legacy placeholders as "no title" too).
+  const PLACEHOLDERS = new Set(['', '新影游', '未命名影游', '未命名项目']);
+  let title: string = (body.title || '').trim();
+  if (PLACEHOLDERS.has(title)) {
+    const existing = await prisma.story.findMany({
+      where: { authorId: user.id, title: { startsWith: '未命名项目' } },
+      select: { title: true },
+    });
+    let max = 0;
+    for (const s of existing) {
+      const m = s.title.match(/^未命名项目\((\d+)\)$/);
+      if (m) max = Math.max(max, parseInt(m[1], 10));
+    }
+    title = `未命名项目(${max + 1})`;
+  }
+
   const story = await prisma.story.create({
     data: {
       authorId: user.id,
-      title: body.title || '未命名影游',
+      title,
       description: body.description || '',
       data: body.data || { nodes: [], edges: [], settings: {}, style: {}, worldView: '' },
       entities: body.entities || null,
@@ -58,5 +75,5 @@ export async function POST(request: NextRequest) {
     },
   });
 
-  return NextResponse.json({ id: story.id });
+  return NextResponse.json({ id: story.id, title: story.title });
 }

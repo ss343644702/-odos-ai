@@ -17,7 +17,7 @@ const nodeLabels: Record<NodeType, string> = {
   scene: '场景',
   ending: '结局',
   ai_generated: 'AI生成',
-  story_config: '故事配置',
+  story_config: '剧情',
 };
 
 type StoryNodeProps = NodeProps & {
@@ -30,6 +30,9 @@ function StoryNodeComponent({ data, selected }: StoryNodeProps) {
 
   // Story config node — special compact render, no handles
   if (data.nodeType === 'story_config') {
+    const op = (data as any).outlinePreview as
+      | { theme?: string; tone?: string; worldView?: string; objective?: string; plotCount?: number; endingCount?: number }
+      | undefined;
     return (
       <div
         className="relative group"
@@ -41,16 +44,47 @@ function StoryNodeComponent({ data, selected }: StoryNodeProps) {
             background: 'var(--bg-secondary)',
             border: `2px solid ${selected ? color : 'var(--border)'}`,
             boxShadow: selected ? `0 0 20px ${color}40` : 'none',
-            minWidth: 180,
+            minWidth: 200,
           }}
         >
           <div className="flex items-center gap-2">
-            <span className="text-lg">⚙️</span>
+            <span className="text-lg">📖</span>
             <div>
               <span className="text-[10px] font-bold px-1.5 py-0.5 rounded" style={{ background: `${color}20`, color }}>{label}</span>
-              <p className="text-xs mt-1 font-medium" style={{ color: 'var(--text-primary)' }}>{data.title || '故事设定'}</p>
+              <p className="text-xs mt-1 font-medium" style={{ color: 'var(--text-primary)' }}>{data.title || '剧情'}</p>
             </div>
           </div>
+
+          {/* Outline preview — full worldview + main objective */}
+          {op && (op.theme || op.worldView || op.objective) && (
+            <div className="mt-2 pt-2 space-y-1.5" style={{ borderTop: '1px solid var(--border)' }}>
+              {op.theme && (
+                <p className="text-[10px] leading-snug" style={{ color: 'var(--text-secondary)' }}>
+                  {op.theme}{op.tone ? ` · ${op.tone}` : ''}
+                </p>
+              )}
+              {op.worldView && (
+                <div>
+                  <span className="text-[9px] font-bold" style={{ color }}>世界观</span>
+                  <p className="text-[10px] leading-snug mt-0.5" style={{ color: 'var(--text-secondary)', whiteSpace: 'pre-wrap' }}>
+                    {op.worldView}
+                  </p>
+                </div>
+              )}
+              {op.objective && (
+                <div>
+                  <span className="text-[9px] font-bold" style={{ color }}>主要目标</span>
+                  <p className="text-[10px] leading-snug mt-0.5" style={{ color: 'var(--text-secondary)', whiteSpace: 'pre-wrap' }}>
+                    {op.objective}
+                  </p>
+                </div>
+              )}
+              <div className="flex gap-2 pt-0.5">
+                <span className="text-[9px] px-1.5 py-0.5 rounded" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-muted)' }}>剧情 {op.plotCount ?? 0}</span>
+                <span className="text-[9px] px-1.5 py-0.5 rounded" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-muted)' }}>结局 {op.endingCount ?? 0}</span>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -238,3 +272,87 @@ function StoryNodeComponent({ data, selected }: StoryNodeProps) {
 }
 
 export default memo(StoryNodeComponent);
+
+// ─── Entity card node (synthetic canvas card derived from story.entities) ───
+const entityKindMeta: Record<'characters' | 'scenes' | 'props', { label: string; icon: string }> = {
+  characters: { label: '角色', icon: '👤' },
+  scenes: { label: '场景', icon: '🏞️' },
+  props: { label: '道具', icon: '📦' },
+};
+
+type EntityCardData = {
+  kind: 'characters' | 'scenes' | 'props';
+  items: { id: string; name: string; imageUrl: string | null; voiceType?: string }[];
+};
+
+function EntityCardComponent({ data, selected }: NodeProps & { data: EntityCardData }) {
+  const meta = entityKindMeta[data.kind];
+  const items = data.items || [];
+  const color = 'var(--accent)';
+
+  return (
+    <div className="relative" style={{ minWidth: 200, maxWidth: 240 }}>
+      <div
+        className="rounded-xl overflow-hidden transition-all px-4 py-3"
+        style={{
+          background: 'var(--bg-secondary)',
+          border: `2px solid ${selected ? color : 'var(--border)'}`,
+          boxShadow: selected ? `0 0 20px ${color}40` : 'none',
+          minWidth: 200,
+        }}
+      >
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-lg">{meta.icon}</span>
+          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded" style={{ background: `${color}20`, color }}>
+            {meta.label}
+          </span>
+          <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>{items.length}</span>
+        </div>
+
+        {items.length > 0 ? (
+          <div className="flex flex-wrap gap-x-1.5 gap-y-2">
+            {items.map((it) => (
+              <div key={it.id} className="flex flex-col items-center gap-0.5" style={{ width: 40 }}>
+                <div
+                  className="w-9 h-9 rounded-full overflow-hidden flex items-center justify-center"
+                  style={{ background: it.imageUrl ? `url(${it.imageUrl}) center/cover` : 'var(--bg-tertiary)', border: '1px solid var(--border)' }}
+                >
+                  {!it.imageUrl && <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>{(it.name || '?').charAt(0)}</span>}
+                </div>
+                <span className="text-[8px] leading-tight w-full text-center break-words" style={{ color: 'var(--text-muted)' }}>{it.name}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>暂无{meta.label}</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export const EntityCardNode = memo(EntityCardComponent);
+
+// ─── Group container node (wraps 故事剧情/角色/场景/道具 for whole-group drag) ───
+function GroupCardComponent({ selected }: NodeProps) {
+  const color = 'var(--accent)';
+  return (
+    <div
+      className="w-full h-full rounded-2xl"
+      style={{
+        background: 'rgba(201,100,66,0.04)',
+        border: `1.5px dashed ${selected ? color : 'var(--border-strong)'}`,
+        boxShadow: selected ? `0 0 24px ${color}30` : 'none',
+      }}
+    >
+      <div
+        className="absolute -top-3 left-3 px-2 py-0.5 rounded-full text-[10px] font-bold flex items-center gap-1"
+        style={{ background: 'var(--bg-secondary)', color, border: `1px solid ${color}40` }}
+      >
+        <span>📖</span> 故事配置
+      </div>
+    </div>
+  );
+}
+
+export const GroupCardNode = memo(GroupCardComponent);

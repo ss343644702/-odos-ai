@@ -3,11 +3,11 @@ import { PRESET_STYLES } from '../types';
 import type { PendingExpansion, NodeProposal } from '../types';
 import { useChatStore } from '@/stores/chatStore';
 import { useStoryStore } from '@/stores/storyStore';
-import { syncFramesFromVoice } from '@/types/story';
+import { syncFramesFromVoice, assignSegmentFrames } from '@/types/story';
 import type { Story, StoryNode, StoryEdge } from '@/types/story';
 import { layoutNodes } from '@/lib/layout';
-import { getEntityImageList } from '@/lib/entity-utils';
-import { submitImageGeneration, pollImageResult } from '@/lib/keling';
+import { getEntityImageList, reconcileVoiceTypes } from '@/lib/entity-utils';
+import { submitImageGeneration, pollImageResult } from '@/lib/flux';
 import { v4 as uuid } from 'uuid';
 
 // ============================================================
@@ -733,6 +733,46 @@ const generateBranches: ToolExecutor = async (_input, ctx) => {
   }
 
   // ============================================================
+  // Phase 3.5c: Backfill endingType (best/good/normal/bad/hidden) onto every ending node
+  // from the outline, so the player's ending tag + medals reflect the authored rating
+  // (previously only 'hidden' was written; other types fell back to Normal).
+  // ============================================================
+  const outlineEndingsTyped = (outline.endings || []).filter((e: any) => e.title && e.type);
+  if (outlineEndingsTyped.length > 0) {
+    // Normalize outline ending types to the node enum (the LLM sometimes emits 'neutral').
+    const normalizeEndingType = (t: string): string => {
+      const x = (t || '').toLowerCase();
+      if (x === 'neutral') return 'normal';
+      return ['best', 'good', 'normal', 'bad', 'hidden'].includes(x) ? x : 'normal';
+    };
+    const matchEndingType = (nodeTitle: string): string | null => {
+      const t = (nodeTitle || '').toLowerCase();
+      if (!t) return null;
+      // 1) exact / substring match (strong)
+      for (const e of outlineEndingsTyped) {
+        const et = (e.title as string).toLowerCase();
+        if (et && (t.includes(et) || et.includes(t))) return e.type;
+      }
+      // 2) char-overlap fallback (same heuristic as the hidden matching above)
+      let best: { type: string; score: number } | null = null;
+      for (const e of outlineEndingsTyped) {
+        const et = (e.title as string).toLowerCase();
+        const overlap = [...et].filter((ch) => t.includes(ch)).length;
+        if (overlap >= Math.min(et.length * 0.5, 3) && (!best || overlap > best.score)) {
+          best = { type: e.type, score: overlap };
+        }
+      }
+      return best?.type ?? null;
+    };
+    for (const node of allNodes) {
+      if (node.type !== 'ending') continue;
+      if (node.data.metadata?.endingType === 'hidden') continue; // keep hidden marking from Phase 3.5
+      const type = matchEndingType(node.data.title || '');
+      if (type) node.data.metadata = { ...node.data.metadata, endingType: normalizeEndingType(type) as any };
+    }
+  }
+
+  // ============================================================
   // Phase 4: Repair + Layout
   // ============================================================
   const repaired = repairBranchStructure(allNodes, allEdges);
@@ -1357,13 +1397,13 @@ const generateEntityImages: ToolExecutor = async (_input, ctx) => {
   // Collect tasks
   const tasks: { type: 'characters' | 'scenes' | 'props'; id: string; name: string; prompt: string; aspectRatio: string }[] = [];
   for (const c of (entities.characters || [])) {
-    if (c.imagePrompt) tasks.push({ type: 'characters', id: c.id, name: c.name, prompt: `${stylePrefix}${c.imagePrompt}`, aspectRatio: '3:4' });
+    if (c.imagePrompt) tasks.push({ type: 'characters', id: c.id, name: c.name, prompt: `${stylePrefix}${c.imagePrompt}`, aspectRatio: '9:16' });
   }
   for (const s of (entities.scenes || [])) {
-    if (s.imagePrompt) tasks.push({ type: 'scenes', id: s.id, name: s.name, prompt: `${stylePrefix}${s.imagePrompt}`, aspectRatio: '16:9' });
+    if (s.imagePrompt) tasks.push({ type: 'scenes', id: s.id, name: s.name, prompt: `${stylePrefix}${s.imagePrompt}`, aspectRatio: '9:16' });
   }
   for (const p of (entities.props || [])) {
-    if (p.imagePrompt) tasks.push({ type: 'props', id: p.id, name: p.name, prompt: `${stylePrefix}${p.imagePrompt}`, aspectRatio: '1:1' });
+    if (p.imagePrompt) tasks.push({ type: 'props', id: p.id, name: p.name, prompt: `${stylePrefix}${p.imagePrompt}`, aspectRatio: '9:16' });
   }
 
   if (tasks.length === 0) return { tool: 'generate_entity_images', success: true, result: '没有需要生成图片的主体' };
@@ -1485,7 +1525,7 @@ const generateStoryboard: ToolExecutor = async (_input, ctx) => {
           const imageList = getEntityImageList(entities, frame.entityRefs, node.data.character);
           const taskId = await submitImageGeneration({
             prompt: frame.imagePrompt,
-            aspect_ratio: '16:9',
+            aspect_ratio: '9:16',
             image_list: imageList.length > 0 ? imageList : undefined,
           });
           const result = await pollImageResult(taskId);
@@ -1526,7 +1566,13 @@ const generateVoice: ToolExecutor = async (_input, ctx) => {
     const results = await Promise.allSettled(
       batch.map((node) =>
         callSkillAPI('voiceGenerator', {
-          storyboard: { nodeId: node.id, frames: node.data.frames || [] },
+          storyboard: {
+            nodeId: node.id,
+            narration: node.data.narration,
+            dialogue: node.data.dialogue,
+            character: node.data.character,
+            frames: node.data.frames || [],
+          },
           entities,
         }, ctx.signal),
       ),
@@ -1536,18 +1582,27 @@ const generateVoice: ToolExecutor = async (_input, ctx) => {
       if (results[j].status === 'fulfilled') {
         const voice = (results[j] as PromiseFulfilledResult<any>).value;
         const defaultVoice = useStoryStore.getState().story?.settings?.defaultVoice || 'narrator';
-        const segments = (voice.voiceSegments || voice.segments || []).map((s: any) => ({
-          text: s.text,
-          voiceType: (s.speaker === 'narrator' || s.voiceType === 'narrator') ? defaultVoice : (s.voiceType || 'narrator'),
-          speaker: s.speaker || 'narrator',
-          speed: s.speed || 1,
-          audioUrl: null,
-        }));
+        const segments = reconcileVoiceTypes(
+          (voice.voiceSegments || voice.segments || []).map((s: any) => ({
+            text: s.text,
+            voiceType: (s.speaker === 'narrator' || s.voiceType === 'narrator') ? defaultVoice : (s.voiceType || 'narrator'),
+            speaker: s.speaker || 'narrator',
+            speed: s.speed || 1,
+            audioUrl: null,
+          })),
+          entities,
+        ) as any[];
         updateNode(batch[j].id, { voiceSegments: segments });
-        // Sync voice text back to frames
+        // Dialogue is now folded into a speaker voice segment — clear the legacy node-level
+        // dialogue/character so it isn't stored/edited separately.
+        if (batch[j].data.dialogue || batch[j].data.character) {
+          updateNode(batch[j].id, { dialogue: null, character: null });
+        }
+        // Sync voice text back to frames + anchor each segment to its frame (frameId)
         const currentFrames = batch[j].data.frames || [];
         if (currentFrames.length > 0) {
-          updateNode(batch[j].id, { frames: syncFramesFromVoice(currentFrames, segments) });
+          const anchored = assignSegmentFrames(currentFrames, segments);
+          updateNode(batch[j].id, { voiceSegments: anchored, frames: syncFramesFromVoice(currentFrames, anchored) });
         }
         segmentCount += segments.length;
       }

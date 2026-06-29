@@ -127,29 +127,61 @@ const NarrationPlayer = forwardRef<NarrationPlayerHandle, NarrationPlayerProps>(
 
           onSegmentChangeRef.current?.(realIdx);
 
-          // Use preloaded audio element directly
+          // Use the preloaded audio element. Pause every OTHER cached audio first so only one
+          // segment ever plays at a time (fixes two voiceovers overlapping).
           const audio = preloadAudio(seg.audioUrl!);
+          preloadCacheRef.current.forEach((a) => { if (a !== audio) { try { a.pause(); } catch { /* ignore */ } } });
+
+          // Advance-once guard + stall watchdog. Advancement normally comes from onended; the
+          // watchdog is a safety net for (a) onended not firing at the end and (b) the audio
+          // stalling mid-playback (network/buffering on the OSS mp3) — the "播放一半卡住" bug.
+          const STALL_MS = 3000; // no playback progress for this long ⇒ treat as stalled
+          let advanced = false;
+          let reloadedOnce = false;
+          let lastTime = -1;
+          let lastProgressAt = Date.now();
+          let watchdog: ReturnType<typeof setInterval> | null = null;
+          const stopWatchdog = () => { if (watchdog) { clearInterval(watchdog); watchdog = null; } };
+          const advance = () => {
+            if (advanced) return;
+            advanced = true;
+            stopWatchdog();
+            audio.onended = null; audio.onerror = null;
+            try { audio.pause(); } catch { /* ignore */ } // stop this segment before the next starts
+            if (sessionRef.current !== session) return;
+            segIdx++;
+            playNext();
+          };
+
+          watchdog = setInterval(() => {
+            if (advanced) return;
+            if (sessionRef.current !== session) { stopWatchdog(); return; }
+            // Reached the end but onended didn't fire → advance. Use the real `ended` flag (not an
+            // early "near duration" guess) so the current clip is truly done — no overlap.
+            if (audio.ended) { advance(); return; }
+            if (audio.currentTime > lastTime) { lastTime = audio.currentTime; lastProgressAt = Date.now(); return; }
+            // No progress for STALL_MS ⇒ stalled. Replay THIS segment from its start (what a manual
+            // refresh effectively did); if it stalls again, skip it so narration never hangs.
+            if (Date.now() - lastProgressAt > STALL_MS) {
+              if (!reloadedOnce) {
+                reloadedOnce = true;
+                lastProgressAt = Date.now();
+                try { audio.pause(); audio.load(); audio.currentTime = 0; audio.play().catch(() => {}); } catch { /* skip next tick */ }
+              } else {
+                advance();
+              }
+            }
+          }, 1000);
 
           audio.onplay = () => {
             if (sessionRef.current !== session) { audio.pause(); return; }
+            lastProgressAt = Date.now();
             setCurrentSpeaker(`${config.label}${seg.speaker !== 'narrator' ? ` · ${seg.speaker}` : ''}`);
           };
-          audio.onended = () => {
-            if (sessionRef.current !== session) return;
-            segIdx++;
-            playNext();
-          };
-          audio.onerror = () => {
-            if (sessionRef.current !== session) return;
-            segIdx++;
-            playNext();
-          };
+          audio.onended = () => advance();
+          audio.onerror = () => advance();
           audio.currentTime = 0;
-          audio.play().catch(() => {
-            if (sessionRef.current !== session) return;
-            segIdx++;
-            playNext();
-          });
+          audio.play().catch(() => advance());
         };
         setIsPlaying(true);
         playNext();

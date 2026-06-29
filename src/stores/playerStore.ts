@@ -13,6 +13,8 @@ interface PlayerState {
   generatedBranches: UserGeneratedBranch[];
 
   initSession: (story: Story) => void;
+  restoreSession: (story: Story, serverSession: PlaySession) => void;
+  setSessionServerId: (id: string) => void;
   navigate: (choiceId: string) => void;
   navigateToNode: (targetNodeId: string, choiceText?: string) => void;
   submitCustomInput: (input: string) => void;
@@ -38,23 +40,62 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
   generatedBranches: [],
 
   initSession: (story) => {
-    const nodes = (story.nodes || []).filter((n) => n.type !== 'story_config');
+    // Strip any AI-generated nodes that may be riding along (e.g. rehydrated from persisted
+    // localStorage). A fresh session must start from the authored story only — otherwise a cleared
+    // server session gets re-polluted from the client's old in-memory/persisted copy.
+    const cleanStory = { ...story, nodes: (story.nodes || []).filter((n) => n.type !== 'ai_generated') };
+    const nodes = (cleanStory.nodes || []).filter((n) => n.type !== 'story_config');
     const startNode = nodes.find((n) => n.type === 'start') || nodes[0];
     if (!startNode) {
-      set({ story, session: null, currentNode: null });
+      set({ story: cleanStory, session: null, currentNode: null });
       return;
     }
     const session: PlaySession = {
       id: uuid(),
-      storyId: story.id,
+      storyId: cleanStory.id,
       playerId: null,
       currentNodeId: startNode.id,
       history: [],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
-    set({ story, session, currentNode: startNode });
+    set({ story: cleanStory, session, currentNode: startNode });
   },
+
+  // Adopt an existing server session: restore id, history and playback position.
+  restoreSession: (story, serverSession) => {
+    const playable = (story.nodes || []).filter((n) => n.type !== 'story_config');
+    const startNode = playable.find((n) => n.type === 'start') || playable[0];
+    // Resolve the saved position to a PLAYABLE node. A story_config id (or a missing id) would
+    // render blank, so fall back: last playable node in history, else the start node.
+    const saved = (story.nodes || []).find((n) => n.id === serverSession.currentNodeId);
+    let currentNode = saved && saved.type !== 'story_config' ? saved : null;
+    if (!currentNode) {
+      const hist = Array.isArray(serverSession.history) ? serverSession.history : [];
+      for (let i = hist.length - 1; i >= 0; i--) {
+        const n = playable.find((p) => p.id === hist[i].nodeId);
+        if (n) { currentNode = n; break; }
+      }
+    }
+    currentNode = currentNode || startNode || null;
+    if (!currentNode) { set({ story, session: null, currentNode: null }); return; }
+    set({
+      story,
+      session: {
+        id: serverSession.id,
+        storyId: story.id,
+        playerId: serverSession.playerId ?? null,
+        currentNodeId: currentNode.id,
+        history: Array.isArray(serverSession.history) ? serverSession.history : [],
+        createdAt: serverSession.createdAt || new Date().toISOString(),
+        updatedAt: serverSession.updatedAt || new Date().toISOString(),
+      },
+      currentNode,
+    });
+  },
+
+  // Adopt the DB row id after POST-creating a session, so later PUTs target a real row.
+  setSessionServerId: (id) => set((s) => (s.session ? { session: { ...s.session, id } } : {})),
 
   navigate: (choiceId) => {
     const { story, session, currentNode } = get();
@@ -91,6 +132,12 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
 
     const targetNode = (story.nodes || []).find((n) => n.id === targetNodeId);
     if (!targetNode) return;
+    // Guard: the story-config node has no narration/frames/voice — navigating to it shows a
+    // blank (white) screen. A stale convergence target could point here; refuse and stay put.
+    if (targetNode.type === 'story_config') {
+      console.warn('[player] refused navigation to story_config node', targetNodeId);
+      return;
+    }
 
     const step: PlayStep = {
       nodeId: currentNode.id,
@@ -149,9 +196,16 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
     const { story, session } = get();
     if (!story || !session || session.history.length === 0) return;
 
+    // Pop history until we hit a step whose node still exists. A step can point to a
+    // dynamic node (e.g. an AI bridge node) that was lost on session restore; skipping
+    // it lets goBack land on the nearest resolvable node instead of silently no-op-ing.
     const history = [...session.history];
-    const lastStep = history.pop()!;
-    const prevNode = (story.nodes || []).find((n) => n.id === lastStep.nodeId);
+    let prevNode: StoryNode | undefined;
+    while (history.length > 0) {
+      const step = history.pop()!;
+      prevNode = (story.nodes || []).find((n) => n.id === step.nodeId);
+      if (prevNode) break;
+    }
     if (!prevNode) return;
 
     set({
@@ -239,10 +293,10 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
   },
 }), {
   name: 'player-store',
-  partialize: (state) => ({
-    story: state.story,
-    session: state.session,
-    currentNode: state.currentNode,
-    generatedBranches: state.generatedBranches,
-  }),
+  // Persist NOTHING that can resurrect server-cleared content. The play page always re-fetches the
+  // story + session from the server on load, so persisting story/session/currentNode/generatedBranches
+  // only caused a stale localStorage copy (incl. old AI nodes) to clobber the freshly-loaded data and
+  // re-POST/PUT the deleted nodes back — making server-side clears impossible to stick. Persist an
+  // empty object so the store always starts from server truth.
+  partialize: () => ({}),
 }));

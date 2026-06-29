@@ -50,8 +50,9 @@ export default function EditorPage() {
 
     const init = async () => {
       if (storyId === 'new') {
-        // Always create a fresh empty story for /editor/new
-        initStory('新影游', '');
+        // Always create a fresh empty story for /editor/new.
+        // Title is left blank so the backend assigns an incrementing 未命名项目(N).
+        initStory('', '');
         // Clear any stale 'chat-new' data, then force a clean chat state
         try { localStorage.removeItem('chat-new'); } catch {}
         useChatStore.getState().clearMessages();
@@ -62,7 +63,7 @@ export default function EditorPage() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              title: storyState?.title || '新影游',
+              // omit title → backend generates 未命名项目(N)
               data: storyState ? {
                 nodes: storyState.nodes,
                 edges: storyState.edges,
@@ -72,7 +73,8 @@ export default function EditorPage() {
               } : {},
             }),
           });
-          const { id } = await res.json();
+          const { id, title } = await res.json();
+          if (title) useStoryStore.getState().updateTitle(title);
           if (id) {
             dbStoryId.current = id;
             // Update both URL and chatStore to use real ID
@@ -106,6 +108,9 @@ export default function EditorPage() {
             settings: data.settings || { defaultVoice: 'narrator', imageStyle: '', language: 'zh-CN', maxDepth: 5, endingCount: 3 },
             worldView: data.worldView || '',
             style: data.style || { styleId: '', styleName: '', stylePromptPrefix: '', colorTone: '', lightingStyle: '' },
+            // Must reload these too, otherwise the next autosave overwrites them with undefined.
+            playerObjective: data.playerObjective ?? (data.outline?.playerObjective || null),
+            entities: dbStory.entities ?? null,
           };
           dbStoryId.current = dbStory.id;
           setStory(fullStory);
@@ -124,13 +129,13 @@ export default function EditorPage() {
         } else {
           // Not found in DB — use localStorage if available
           if (!useStoryStore.getState().story) {
-            initStory('新影游', '');
+            initStory('未命名项目', '');
           }
         }
       } catch {
         // Offline — use localStorage
         if (!useStoryStore.getState().story) {
-          initStory('新影游', '');
+          initStory('未命名项目', '');
         }
       }
       setLoading(false);

@@ -24,13 +24,24 @@ export async function PUT(
 
     return NextResponse.json({ success: true, updatedAt: session.updatedAt });
   } catch (err: any) {
-    // If achievements field doesn't exist in DB yet, retry without it
-    if (err.message?.includes('achievements') || err.message?.includes('Unknown argument')) {
+    // If an optional column doesn't exist in the DB yet (P2022), retry with only the core fields.
+    if (err.code === 'P2022' || err.message?.includes('achievements') || err.message?.includes('Unknown argument')) {
       const data: Record<string, any> = {};
       if (body.currentNodeId !== undefined) data.currentNodeId = body.currentNodeId;
       if (body.history !== undefined) data.history = body.history;
-      const session = await prisma.playSession.update({ where: { id }, data });
-      return NextResponse.json({ success: true, updatedAt: session.updatedAt });
+      if (body.dynamicNodes !== undefined) data.dynamicNodes = body.dynamicNodes;
+      if (body.dynamicEdges !== undefined) data.dynamicEdges = body.dynamicEdges;
+      try {
+        const session = await prisma.playSession.update({ where: { id }, data });
+        return NextResponse.json({ success: true, updatedAt: session.updatedAt });
+      } catch {
+        // Last resort: persist just position + history.
+        const session = await prisma.playSession.update({
+          where: { id },
+          data: { currentNodeId: body.currentNodeId, history: body.history },
+        });
+        return NextResponse.json({ success: true, updatedAt: session.updatedAt });
+      }
     }
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
