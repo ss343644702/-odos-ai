@@ -405,6 +405,9 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
   // Handle choice selection — check if target is a stub, wait if needed
   const handleChoose = useCallback((choiceId: string) => {
     const state = usePlayerStore.getState();
+    // While free-input is generating a branch, choices must be inert — picking one mid-generation
+    // would race the in-flight pipeline (double navigation / orphaned nodes).
+    if (state.isBranching) return;
     const node = state.currentNode;
     if (!node) return;
 
@@ -900,7 +903,13 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
         {showChoices && !isEnding && !isTyping && (
           <div
             className="mt-3 fade-in overflow-y-auto hide-scrollbar"
-            style={{ maxHeight: '17rem' }}
+            style={{
+              maxHeight: '17rem',
+              // While a free-input branch is generating, lock the choices: non-interactive + dimmed
+              // so the player can't pick an option that would race the in-flight generation.
+              pointerEvents: isBranching ? 'none' : undefined,
+              opacity: isBranching ? 0.4 : undefined,
+            }}
           >
             {waitingForNode ? (
               <div
