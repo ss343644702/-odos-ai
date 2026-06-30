@@ -41,11 +41,24 @@ function LoginForm() {
         setError(signUpError.message);
         return;
       }
-      // Registration successful — show email verification prompt
-      setLoading(false);
-      setEmailSent(true);
-      setCountdown(120);
-      return;
+      // Email confirmation is disabled — sign in immediately with the same credentials so the
+      // session cookies are set, then redirect. (If confirmation is somehow still ON, the sign-in
+      // returns "Email not confirmed" → fall back to the verify-email screen.)
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password,
+      });
+      if (signInError) {
+        setLoading(false);
+        if (/confirm/i.test(signInError.message)) {
+          setEmailSent(true);
+          setCountdown(120);
+        } else {
+          setError(signInError.message);
+        }
+        return;
+      }
+      // Registered + logged in — fall through to the redirect below.
     } else {
       const { error: signInError } = await supabase.auth.signInWithPassword({
         email: email.trim(),
