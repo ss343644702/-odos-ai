@@ -681,8 +681,13 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
 
   return (
     <div
-      className={`relative w-full overflow-hidden ${isPreview ? 'h-full' : 'h-[100dvh]'}`}
-      style={{ background: 'var(--bg-primary)' }}
+      className={isPreview
+        ? 'relative w-full overflow-hidden h-full'
+        // Full-screen play: fixed inset-0 escapes the layout's max-w-[430px] frame so the player is
+        // truly edge-to-edge on mobile (no cream side strips on phones wider than 430px). Black bg so
+        // any letterboxing reads as the media backdrop, never white.
+        : 'fixed inset-0 w-full overflow-hidden'}
+      style={{ background: isPreview ? 'var(--bg-primary)' : '#000' }}
     >
       {/* ===== Media layer — full-bleed background ===== */}
       <div className="absolute inset-0">
