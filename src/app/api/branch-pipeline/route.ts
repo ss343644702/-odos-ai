@@ -766,7 +766,11 @@ export async function POST(request: NextRequest) {
               const audioUrl = await uploadAudio(audioBuffer, `${nodeId}_seg${i}_${Date.now()}.mp3`);
               voiceSegments[i] = { ...voiceSegments[i], audioUrl };
               ttsOk++;
-            } catch { /* skip */ }
+            } catch (e: any) {
+              // Surface the real TTS failure (auth / balance / wrong site / upload) instead of
+              // silently degrading to no-voice — the count alone can't tell us which.
+              console.error(`[TTS ✗] seg${i} ${nodeId}: ${e?.message || e}`);
+            }
           }),
         );
         ttsMs = Date.now() - tStart;

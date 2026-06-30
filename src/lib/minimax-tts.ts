@@ -44,7 +44,9 @@ export async function synthesizeSpeech(params: {
 
   const result = await response.json();
   if (result.base_resp?.status_code !== 0) {
-    throw new Error(`MiniMax TTS error: ${result.base_resp?.status_msg || 'unknown'}`);
+    // Include the numeric code — 1004=auth fail, 1008=insufficient balance, 2049=invalid key,
+    // and a wrong-site key (国内站 key on api.minimax.io) shows up here too.
+    throw new Error(`MiniMax TTS error ${result.base_resp?.status_code}: ${result.base_resp?.status_msg || 'unknown'}`);
   }
 
   if (!result.data?.audio) {
