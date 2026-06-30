@@ -82,6 +82,9 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
   const [waitFailed, setWaitFailed] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [showProgress, setShowProgress] = useState(false);
+  // True when the browser blocked narration autoplay (no user gesture yet). The first tap then
+  // STARTS playback from the current segment instead of skipping the node to its end.
+  const [audioBlocked, setAudioBlocked] = useState(false);
   const waitingPollRef = useRef<ReturnType<typeof setInterval>>(undefined);
   const waitingTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const typewriterRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -192,6 +195,7 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
     if (displayedText !== '') setDisplayedText('');
     if (isTyping) setIsTyping(false);
     if (waitingForNode) setWaitingForNode(false);
+    if (audioBlocked) setAudioBlocked(false);
   }
   const navCount = navCountRef.current;
 
@@ -290,6 +294,13 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
   // Skip / advance
   const handleTap = useCallback(() => {
     if (!currentNode || showChoices) return;
+    // Autoplay was blocked: this first tap is the user's gesture — START narration from the current
+    // segment (frame 0) rather than skipping the whole node to its end.
+    if (audioBlocked) {
+      setAudioBlocked(false);
+      narrationRef.current?.playFromSegment(currentSegmentIndex);
+      return;
+    }
     if (typewriterRef.current) clearTimeout(typewriterRef.current);
     narrationRef.current?.stop();
     // Stop video if playing
@@ -305,7 +316,7 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
     setIsTyping(false);
     setNarrationDone(true);
     setShowChoices(true);
-  }, [currentNode, showChoices, voiceSegments]);
+  }, [currentNode, showChoices, voiceSegments, audioBlocked, currentSegmentIndex]);
 
   const navigateToNode = usePlayerStore((s) => s.navigateToNode);
 
@@ -817,7 +828,27 @@ export default function GameplayView({ isPreview = false }: { isPreview?: boolea
         voiceSegments={voiceSegments}
         onEnd={handleNarrationEnd}
         onSegmentChange={handleSegmentChange}
+        onAutoplayBlocked={() => setAudioBlocked(true)}
       />
+
+      {/* Autoplay blocked: full-screen tap target + gentle hint so the paused first frame doesn't
+          look stuck. Tapping anywhere starts narration from the beginning, then the overlay clears. */}
+      {audioBlocked && !showChoices && (
+        <button
+          onClick={handleTap}
+          aria-label="轻触播放"
+          className="absolute inset-0 z-20 flex items-center justify-center fade-in"
+          style={{ background: 'transparent' }}
+        >
+          <div
+            className="flex items-center gap-2 px-4 py-2 rounded-full"
+            style={{ background: 'rgba(0,0,0,0.45)', backdropFilter: 'blur(4px)' }}
+          >
+            <span className="text-white text-lg">▶</span>
+            <span className="text-white text-[13px]">轻触播放</span>
+          </div>
+        </button>
+      )}
 
       {/* ===== Bottom overlay: skip / subtitle / choices ===== */}
       <div

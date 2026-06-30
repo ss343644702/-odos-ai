@@ -18,6 +18,9 @@ interface NarrationPlayerProps {
   voiceSegments: VoiceSegment[];
   onEnd?: () => void;
   onSegmentChange?: (segmentIndex: number) => void;
+  // Fired when the browser blocks autoplay (no user gesture yet). The player holds on the current
+  // segment; the parent should resume playback (playFromSegment) on the next user tap.
+  onAutoplayBlocked?: () => void;
 }
 
 export interface NarrationPlayerHandle {
@@ -28,7 +31,7 @@ export interface NarrationPlayerHandle {
 }
 
 const NarrationPlayer = forwardRef<NarrationPlayerHandle, NarrationPlayerProps>(
-  function NarrationPlayer({ nodeId, voiceSegments, onEnd, onSegmentChange }, ref) {
+  function NarrationPlayer({ nodeId, voiceSegments, onEnd, onSegmentChange, onAutoplayBlocked }, ref) {
     const [isPlaying, setIsPlaying] = useState(false);
     const [isMuted, setIsMuted] = useState(false);
     const isMutedRef = useRef(false);
@@ -45,6 +48,9 @@ const NarrationPlayer = forwardRef<NarrationPlayerHandle, NarrationPlayerProps>(
 
     const onSegmentChangeRef = useRef(onSegmentChange);
     useEffect(() => { onSegmentChangeRef.current = onSegmentChange; }, [onSegmentChange]);
+
+    const onAutoplayBlockedRef = useRef(onAutoplayBlocked);
+    useEffect(() => { onAutoplayBlockedRef.current = onAutoplayBlocked; }, [onAutoplayBlocked]);
 
     const voiceSegmentsRef = useRef(voiceSegments);
     voiceSegmentsRef.current = voiceSegments; // Sync update during render (no effect delay)
@@ -137,6 +143,7 @@ const NarrationPlayer = forwardRef<NarrationPlayerHandle, NarrationPlayerProps>(
           // stalling mid-playback (network/buffering on the OSS mp3) — the "播放一半卡住" bug.
           const STALL_MS = 3000; // no playback progress for this long ⇒ treat as stalled
           let advanced = false;
+          let waitingForGesture = false; // autoplay blocked → holding for first user tap, not stalled
           let reloadedOnce = false;
           let lastTime = -1;
           let lastProgressAt = Date.now();
@@ -155,6 +162,7 @@ const NarrationPlayer = forwardRef<NarrationPlayerHandle, NarrationPlayerProps>(
 
           watchdog = setInterval(() => {
             if (advanced) return;
+            if (waitingForGesture) return; // autoplay blocked, holding for a tap — not a stall
             if (sessionRef.current !== session) { stopWatchdog(); return; }
             // Reached the end but onended didn't fire → advance. Use the real `ended` flag (not an
             // early "near duration" guess) so the current clip is truly done — no overlap.
@@ -175,13 +183,26 @@ const NarrationPlayer = forwardRef<NarrationPlayerHandle, NarrationPlayerProps>(
 
           audio.onplay = () => {
             if (sessionRef.current !== session) { audio.pause(); return; }
+            waitingForGesture = false;
             lastProgressAt = Date.now();
             setCurrentSpeaker(`${config.label}${seg.speaker !== 'narrator' ? ` · ${seg.speaker}` : ''}`);
           };
           audio.onended = () => advance();
           audio.onerror = () => advance();
           audio.currentTime = 0;
-          audio.play().catch(() => advance());
+          audio.play().catch((err: any) => {
+            // Autoplay policy blocks play() until the user interacts with the page. That is NOT a
+            // segment failure — skipping here would cascade through every preloaded segment and the
+            // node would blitz to its last frame (the "进播放器默认从最后一帧开始" bug). Instead hold
+            // on THIS segment and let the parent resume (playFromSegment) on the next tap. Any OTHER
+            // error (404/decode) is real → advance so narration never hangs.
+            if (err?.name === 'NotAllowedError') {
+              waitingForGesture = true;
+              onAutoplayBlockedRef.current?.();
+            } else {
+              advance();
+            }
+          });
         };
         setIsPlaying(true);
         playNext();
