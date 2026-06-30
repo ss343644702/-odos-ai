@@ -313,6 +313,15 @@ export function useReactLoop(config?: Partial<ReactModelConfig>) {
       } else if (lastTurn.observation) {
         // Tool paused for user input (e.g. expand_node with _pauseForUser)
         lastTurn.observation += `\n用户回复: ${userResponse}`;
+      } else {
+        // Last turn was a Final Answer (the agent ended its turn with a plain reply / clarifying
+        // question — status 'done', no tool, no observation). Without attaching the reply here it
+        // lives only in userMessages and buildMessages never renders it, so the agent never sees
+        // the answer and re-asks the same question. Link it to this turn so it's shown.
+        const prior = lastTurn.finalAnswer
+          ? `[你之前的回复: ${String(lastTurn.finalAnswer).slice(0, 300)}]\n`
+          : '';
+        lastTurn.observation = `${prior}用户回复: ${userResponse}`;
       }
     }
     await runLoop();
